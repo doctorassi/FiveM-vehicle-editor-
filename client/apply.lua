@@ -20,6 +20,27 @@ local handlingApplied = {}
 local modsApplied = {}
 ---[modelHash] = spawn name, rebuilt whenever the config-driven tune list changes.
 local modelIndex = {}
+---[netId] = true for ox_core vehicles whose performance mods belong to a player
+---or a group. Their handling is still tuned; only the mods are left alone.
+local oxSkipMods = {}
+---Whether any ox_core policy is in play at all, so the common path skips the
+---netId lookup entirely.
+local oxActive = false
+
+local function refreshOxActive()
+    oxActive = next(oxSkipMods) ~= nil
+end
+
+---@param vehicle number
+---@return boolean
+local function modsAreOurs(vehicle)
+    if not oxActive then return true end
+
+    local netId = NetworkGetNetworkIdFromEntity(vehicle)
+    if not netId or netId == 0 then return true end
+
+    return not oxSkipMods[netId]
+end
 
 local function rebuildModelIndex()
     modelIndex = {}
@@ -109,9 +130,14 @@ function Apply.ToVehicle(vehicle, force)
     end
 
     if Config.ApplyMods and tune.mods and modsApplied[vehicle] ~= Tunes.version then
-        -- Mods only stick on a vehicle this client owns; retried next sweep
-        -- otherwise, which is why this is not marked applied on failure.
-        if NetworkHasControlOfEntity(vehicle) then
+        if not modsAreOurs(vehicle) then
+            -- An ox_core owned vehicle: ox_core already applied the properties
+            -- the player paid for, so leave them be. Marked done so the sweep
+            -- stops reconsidering it.
+            modsApplied[vehicle] = Tunes.version
+        elseif NetworkHasControlOfEntity(vehicle) then
+            -- Mods only stick on a vehicle this client owns; retried next sweep
+            -- otherwise, which is why this is not marked applied on failure.
             Apply.Mods(vehicle, tune.mods)
             modsApplied[vehicle] = Tunes.version
         end
@@ -164,6 +190,18 @@ function Apply.Receive(payload)
     Tunes.tunes = Tunes.tunes or {}
     rebuildModelIndex()
 
+    -- Rebuilt wholesale: the server sends the full policy every sync, and the
+    -- keys arrive as strings so they survive the event serialisation intact.
+    oxSkipMods = {}
+    if type(payload.oxPolicy) == 'table' then
+        for netId, entry in pairs(payload.oxPolicy) do
+            if entry and entry.skipMods then
+                oxSkipMods[tonumber(netId)] = true
+            end
+        end
+    end
+    refreshOxActive()
+
     -- The version moved, so every cached entity is stale; the next sweep
     -- re-applies. Clearing here rather than comparing per-entity keeps a reset
     -- (which removes values) as cheap as an edit.
@@ -188,4 +226,46 @@ CreateThread(function()
     if state and state.sync then
         Apply.Receive(state.sync)
     end
+end)
+
+--------------------------------------------------------------------------------
+-- ox_core
+--------------------------------------------------------------------------------
+
+---An ox_core vehicle just spawned server-side. Apply as soon as the entity
+---streams in here rather than waiting for the next sweep.
+RegisterNetEvent('vehicleeditor:oxVehicle', function(netId, model, skipMods)
+    if type(netId) ~= 'number' then return end
+
+    if skipMods then
+        oxSkipMods[netId] = true
+    else
+        oxSkipMods[netId] = nil
+    end
+    refreshOxActive()
+
+    if not Tunes.tunes[model] then return end
+
+    CreateThread(function()
+        -- The entity is created server-side, so it may not have streamed in
+        -- here yet. Give it a few seconds, then let the sweep take over.
+        local deadline = GetGameTimer() + 5000
+
+        while GetGameTimer() < deadline do
+            if NetworkDoesNetworkIdExist(netId) then
+                local vehicle = NetworkGetEntityFromNetworkId(netId)
+                if vehicle and vehicle ~= 0 and DoesEntityExist(vehicle) then
+                    Apply.ToVehicle(vehicle, true)
+                    return
+                end
+            end
+            Wait(100)
+        end
+    end)
+end)
+
+RegisterNetEvent('vehicleeditor:oxVehicleGone', function(netId)
+    if type(netId) ~= 'number' then return end
+    oxSkipMods[netId] = nil
+    refreshOxActive()
 end)

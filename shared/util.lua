@@ -152,6 +152,43 @@ function Util.RollTier(tier)
 end
 
 --------------------------------------------------------------------------------
+-- ox_core / ox_lib interop
+--------------------------------------------------------------------------------
+
+---Translate this resource's mod ids into ox_lib VehicleProperties keys, which
+---is the shape ox_core stores in its database.
+---Note the spelling: this resource uses `armour`, ox_lib uses `modArmor`.
+---@param mods table resolved mods from Store.ResolveMods
+---@return table properties
+function Util.ModsToProperties(mods)
+    if type(mods) ~= 'table' then return {} end
+
+    return {
+        modEngine       = mods.engine,
+        modBrakes       = mods.brakes,
+        modTransmission = mods.transmission,
+        modSuspension   = mods.suspension,
+        modArmor        = mods.armour,
+        modTurbo        = mods.turbo and true or false,
+    }
+end
+
+---Merge tier properties into an existing VehicleProperties table without
+---discarding anything else stored on it (colours, plate, extras, damage, ...).
+---@param existing table? the vehicle's current properties
+---@param mods table resolved mods
+---@return table merged
+function Util.MergeModProperties(existing, mods)
+    local merged = type(existing) == 'table' and Util.DeepCopy(existing) or {}
+
+    for key, value in pairs(Util.ModsToProperties(mods)) do
+        merged[key] = value
+    end
+
+    return merged
+end
+
+--------------------------------------------------------------------------------
 -- Display
 --------------------------------------------------------------------------------
 

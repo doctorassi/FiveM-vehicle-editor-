@@ -31,6 +31,33 @@ Config.WriteMetaOnSave = true
 Config.Debug = false
 
 --------------------------------------------------------------------------------
+-- ox_core integration (optional)
+--------------------------------------------------------------------------------
+-- Picked up automatically when ox_core is running; everything here is ignored
+-- otherwise. See the README for the exports this exposes.
+
+Config.OxCore = {
+    -- true / false to force, 'auto' to use ox_core when it is started.
+    Enabled = 'auto',
+
+    -- Apply the tune the moment ox:spawnedVehicle fires, instead of waiting for
+    -- the next pool sweep. Costs nothing and removes the visible settling.
+    ApplyOnSpawn = true,
+
+    -- Owned and group vehicles carry performance mods a player paid for, and
+    -- ox_core persists them in the database.
+    --   false -> leave those mods alone; handling is still tuned to the tier.
+    --   true  -> overwrite them with the tier's mods on every spawn.
+    -- Leave this false unless tiers are meant to override player upgrades.
+    ApplyModsToOwned = false,
+
+    -- When the tier's mods ARE applied to an ox_core vehicle, also write them
+    -- into its saved properties so garages and respawns keep them, instead of
+    -- forcing them client-side every time.
+    PersistModsToProperties = true,
+}
+
+--------------------------------------------------------------------------------
 -- Vehicles you want to edit
 --------------------------------------------------------------------------------
 -- `model` is the spawn name. `tier` is the starting tier (1-5) used by the

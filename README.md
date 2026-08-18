@@ -21,10 +21,12 @@ runs.
 - **Always saved** — every edit autosaves to `data/handling.meta` and is reloaded on startup.
 - **Live application** — saved values take effect immediately for every player, no restart needed.
 - **Server-side authority** — ace-gated, with every value re-validated and clamped on the server.
+- **ox_core support** (optional) — tunes apply the instant an ox_core vehicle spawns, player-owned mods are respected, and tier-aware wrappers around `Ox.CreateVehicle` / `Ox.SpawnVehicle` are exported.
 
 ## Requirements
 
 - [ox_lib](https://github.com/overextended/ox_lib)
+- [ox_core](https://github.com/overextended/ox_core) — **optional**, detected at runtime
 
 ## Installation
 
@@ -33,8 +35,12 @@ runs.
 
    ```cfg
    ensure ox_lib
+   ensure ox_core            # optional
    ensure fivem-vehicle-editor
    ```
+
+   Start ox_core **before** this resource so the spawn hooks catch vehicles
+   created during boot.
 
 3. Grant yourself the ace permission:
 
@@ -127,6 +133,70 @@ field with no band in a tier is left at its current value when rolling.
 Mod level `-1` is stock; `0` is the first upgrade. A per-vehicle override set in
 the menu always wins over the tier default.
 
+## ox_core integration
+
+Picked up automatically when `ox_core` is running, ignored entirely otherwise.
+Configure it under `Config.OxCore`.
+
+### What it does
+
+**Applies on spawn.** ox_core creates vehicles server-side, so without this the
+tune only lands on the next client sweep. The editor listens for
+`ox:spawnedVehicle` and pushes the tune the moment the entity streams in.
+
+**Respects owned vehicles.** ox_core persists a vehicle's performance mods in
+its database as ox_lib `VehicleProperties`. Forcing tier mods onto a car a
+player paid to upgrade would fight those saved properties on every spawn, so
+vehicles with an `owner` or `group` keep their own mods by default — their
+**handling is still tuned to the tier**, only the mods are left alone. Set
+`Config.OxCore.ApplyModsToOwned = true` if tiers are meant to override player
+upgrades.
+
+**Bakes mods into properties.** For unowned ox_core vehicles the tier's mods are
+written into the vehicle's properties via `setProperties`, so ox_core carries
+them instead of every client re-forcing them each spawn.
+
+### Exports
+
+```lua
+-- Create through ox_core with the tier's mods already in its properties.
+-- Mirrors Ox.CreateVehicle(data, coords, heading).
+local vehicle, err = exports['fivem-vehicle-editor']:CreateTieredVehicle(
+    { model = 'sultan', owner = charId }, coords, heading)
+
+-- Spawn a stored vehicle and guarantee the tune is applied immediately.
+-- Mirrors Ox.SpawnVehicle(dbId, coords, heading). Saved mods are untouched.
+local vehicle, err = exports['fivem-vehicle-editor']:SpawnTieredVehicle(dbId, coords, heading)
+
+-- Explicitly write the tier's mods into an ox_core vehicle's SAVED properties.
+-- This overwrites mods a player may have paid for, which is why it is never
+-- automatic for an owned vehicle — a script has to ask.
+local ok, err = exports['fivem-vehicle-editor']:ApplyTierProperties(entityId)
+
+-- Read-only, for dealership and garage scripts.
+local tune = exports['fivem-vehicle-editor']:GetVehicleTune('sultan')
+--> { model, tier, values, edits, originals, mods, properties }
+local tier = exports['fivem-vehicle-editor']:GetVehicleTier('sultan')
+```
+
+`CreateTieredVehicle` and `SpawnTieredVehicle` return `nil, err` rather than
+throwing, so a failed spawn (model missing from ox_core's `vehicles.json`, or
+not listed in `Config.Vehicles`) is reported instead of crashing the caller.
+
+### Mod key mapping
+
+This resource spells the config key `armour`; ox_lib uses `modArmor`. The
+translation lives in `Util.ModsToProperties`:
+
+| Editor | ox_lib property | Mod type |
+|---|---|---|
+| `engine` | `modEngine` | 11 |
+| `brakes` | `modBrakes` | 12 |
+| `transmission` | `modTransmission` | 13 |
+| `suspension` | `modSuspension` | 15 |
+| `armour` | `modArmor` | 16 |
+| `turbo` | `modTurbo` (boolean) | 18 |
+
 ## How saving works
 
 `data/handling.meta` is both the file the game loads and the editor's save file.
@@ -199,8 +269,8 @@ lua5.4 tests/run.lua
 
 Covers tier rolls staying inside their bands, values being clamped server-side,
 non-finite input being rejected, originals never being overwritten once
-captured, a save-then-restart restoring identical state, and foreign entries
-surviving a rewrite.
+captured, a save-then-restart restoring identical state, foreign entries
+surviving a rewrite, and the ox_core property mapping and ownership rules.
 
 ## Project layout
 
@@ -214,6 +284,7 @@ client/apply.lua      live application sweep over the vehicle pool
 client/menu.lua       ox_lib menus
 server/store.lua      authoritative state, validation, tier rolls
 server/meta.lua       handling.meta writer and parser
+server/oxcore.lua     optional ox_core hooks and exports
 server/main.lua       callbacks, autosave, startup load
 tests/                offline test suite
 ```

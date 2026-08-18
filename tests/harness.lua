@@ -43,6 +43,17 @@ local function installNatives()
     AddEventHandler = function() end
     RegisterCommand = function() end
 
+    -- ox_core is absent under test, so the integration stays dormant and its
+    -- pure helpers can still be exercised.
+    GetResourceState = function() return 'missing' end
+    NetworkGetNetworkIdFromEntity = function(entity) return entity end
+    DoesEntityExist = function(entity) return entity ~= nil and entity ~= 0 end
+
+    harness.exported = {}
+    exports = setmetatable({}, {
+        __call = function(_, name, fn) harness.exported[name] = fn end,
+    })
+
     lib = {
         callback = {
             register = function() end,
@@ -62,6 +73,7 @@ function harness.load(includeServer)
     if includeServer ~= false then
         dofile(ROOT .. 'server/store.lua')
         dofile(ROOT .. 'server/meta.lua')
+        dofile(ROOT .. 'server/oxcore.lua')
     end
 end
 

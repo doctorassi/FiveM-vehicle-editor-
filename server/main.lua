@@ -210,6 +210,7 @@ AddEventHandler('onResourceStart', function(resource)
 
     -- Make sure every configured vehicle has a store entry even before it has
     -- been touched, so the menu can list it immediately.
+    -- (ox_core is initialised after this, so it can read resolved mods.)
     for i = 1, #Config.Vehicles do
         Store.Ensure(Config.Vehicles[i].model)
     end
@@ -222,6 +223,8 @@ AddEventHandler('onResourceStart', function(resource)
         print(('[vehicle-editor] %d vehicle(s) need a vanilla snapshot; open /%s in game to capture them.')
             :format(#missing, Config.Command))
     end
+
+    OxCore.Init()
 
     broadcastSync()
 end)

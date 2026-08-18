@@ -310,5 +310,11 @@ function Store.BuildSync()
         }
     end
 
+    -- Present only when ox_core is running; tells clients which spawned
+    -- vehicles have mods that are not ours to touch.
+    if OxCore and OxCore.available then
+        payload.oxPolicy = OxCore.BuildPolicy()
+    end
+
     return payload
 end

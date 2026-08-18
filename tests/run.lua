@@ -519,6 +519,147 @@ test('vectors are written with x/y/z attributes', function()
 end)
 
 --------------------------------------------------------------------------------
+print('\nox_core integration')
+--------------------------------------------------------------------------------
+
+test('mods map onto ox_lib VehicleProperties keys', function()
+    local properties = Util.ModsToProperties({
+        engine = 3, brakes = 2, transmission = 1, suspension = 0, armour = -1, turbo = true,
+    })
+
+    assertEqual(properties.modEngine, 3, 'modEngine')
+    assertEqual(properties.modBrakes, 2, 'modBrakes')
+    assertEqual(properties.modTransmission, 1, 'modTransmission')
+    assertEqual(properties.modSuspension, 0, 'modSuspension')
+    -- This resource spells it "armour", ox_lib spells it "modArmor".
+    assertEqual(properties.modArmor, -1, 'modArmor')
+    assertEqual(properties.modTurbo, true, 'modTurbo')
+end)
+
+test('turbo always maps to a boolean', function()
+    assertEqual(Util.ModsToProperties({ turbo = nil }).modTurbo, false, 'nil turbo')
+    assertEqual(Util.ModsToProperties({ turbo = false }).modTurbo, false, 'false turbo')
+    assertEqual(Util.ModsToProperties({ turbo = true }).modTurbo, true, 'true turbo')
+end)
+
+test('merging mods leaves the rest of the properties alone', function()
+    local existing = {
+        plate = 'ABC 123',
+        color1 = 12,
+        modEngine = 0,
+        extras = { [1] = 1 },
+    }
+
+    local merged = Util.MergeModProperties(existing, { engine = 3, turbo = true })
+
+    assertEqual(merged.plate, 'ABC 123', 'plate kept')
+    assertEqual(merged.color1, 12, 'colour kept')
+    assertEqual(merged.extras[1], 1, 'extras kept')
+    assertEqual(merged.modEngine, 3, 'engine overwritten')
+    assertEqual(merged.modTurbo, true, 'turbo written')
+    assertEqual(existing.modEngine, 0, 'the source table is not mutated')
+end)
+
+test('ox_core stays dormant when it is not running', function()
+    assertEqual(OxCore.available, false, 'not available')
+
+    local vehicle, err = OxCore.CreateTieredVehicle('sultan')
+    assertEqual(vehicle, nil, 'no vehicle')
+    assertTrue(err and err:find('not available'), 'explains why')
+end)
+
+test('unowned vehicles get the tier mods, owned ones keep theirs', function()
+    resetStore()
+    Store.Ensure('sultan')
+
+    local unowned = { model = 'sultan' }
+    local owned = { model = 'sultan', owner = 4 }
+    local groupOwned = { model = 'sultan', group = 'police' }
+
+    Config.OxCore.ApplyModsToOwned = false
+    assertEqual(OxCore.ShouldApplyMods(unowned), true, 'unowned')
+    assertEqual(OxCore.ShouldApplyMods(owned), false, 'player owned')
+    assertEqual(OxCore.ShouldApplyMods(groupOwned), false, 'group owned')
+
+    -- Opting in overrides player upgrades on purpose.
+    Config.OxCore.ApplyModsToOwned = true
+    assertEqual(OxCore.ShouldApplyMods(owned), true, 'owned with opt-in')
+    Config.OxCore.ApplyModsToOwned = false
+
+    -- The global mod switch wins over everything.
+    Config.ApplyMods = false
+    assertEqual(OxCore.ShouldApplyMods(unowned), false, 'mods globally off')
+    Config.ApplyMods = true
+end)
+
+test('tier properties follow the resolved mods', function()
+    resetStore()
+    Store.Ensure('sultan')
+    Store.SetTier('sultan', 5)
+
+    local properties = OxCore.TierProperties('sultan')
+    assertEqual(properties.modEngine, Config.Tiers[5].mods.engine, 'tier 5 engine')
+
+    Store.SetMod('sultan', 'engine', 0)
+    assertEqual(OxCore.TierProperties('sultan').modEngine, 0, 'override wins')
+
+    assertEqual(OxCore.TierProperties('not_a_car'), nil, 'unconfigured model')
+end)
+
+test('the tune export exposes tier, mods and properties', function()
+    resetStore()
+    Store.SetOriginals('sultan', harness.fakeOriginals(1))
+    Store.SetTier('sultan', 4)
+    Store.SetValue('sultan', 'fBrakeForce', 1.2)
+
+    local tune = OxCore.GetVehicleTune('sultan')
+    assertEqual(tune.tier, 4, 'tier')
+    assertEqual(tune.edits.fBrakeForce, 1.2, 'edit')
+    assertTrue(tune.values, 'resolved values')
+    assertTrue(tune.originals, 'originals')
+    assertEqual(tune.properties.modEngine, Config.Tiers[4].mods.engine, 'properties')
+
+    assertEqual(OxCore.GetVehicleTune('not_a_car'), nil, 'unknown model')
+    assertEqual(OxCore.GetVehicleTier('sultan'), 4, 'tier accessor')
+end)
+
+test('the policy map is keyed by string for the network boundary', function()
+    OxCore.tracked = {
+        [42] = { model = 'sultan', owned = true, skipMods = true },
+        [43] = { model = 'adder', owned = false, skipMods = false },
+    }
+
+    local policy = OxCore.BuildPolicy()
+    assertEqual(policy['42'].skipMods, true, 'owned skips mods')
+    assertEqual(policy['42'].model, 'sultan', 'model carried')
+    assertEqual(policy['43'].skipMods, false, 'unowned does not skip')
+    assertEqual(policy[42], nil, 'no numeric keys')
+
+    OxCore.tracked = {}
+end)
+
+test('the sync payload carries the ox policy only when ox_core is live', function()
+    resetStore()
+    Store.Ensure('sultan')
+
+    assertEqual(Store.BuildSync().oxPolicy, nil, 'absent without ox_core')
+
+    OxCore.available = true
+    OxCore.tracked = { [7] = { model = 'sultan', owned = true, skipMods = true } }
+    assertEqual(Store.BuildSync().oxPolicy['7'].skipMods, true, 'present with ox_core')
+
+    OxCore.available = false
+    OxCore.tracked = {}
+end)
+
+test('the ox_core exports are registered', function()
+    for _, name in ipairs({ 'CreateTieredVehicle', 'SpawnTieredVehicle', 'ApplyTierProperties',
+                            'GetVehicleTune', 'GetVehicleTier' }) do
+        assertTrue(harness.exported[name], name .. ' export')
+    end
+end)
+
+--------------------------------------------------------------------------------
 print('\nconfig integrity')
 --------------------------------------------------------------------------------
 

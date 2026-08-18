@@ -23,6 +23,7 @@ client_scripts {
 server_scripts {
     'server/store.lua',
     'server/meta.lua',
+    'server/oxcore.lua',
     'server/main.lua',
 }
 
@@ -35,3 +36,9 @@ files {
 data_file 'HANDLING_FILE' 'data/handling.meta'
 
 dependency 'ox_lib'
+
+-- ox_core is optional and deliberately NOT declared as a dependency: the
+-- integration is detected at runtime, so the resource starts either way. When
+-- ox_core is running the editor hooks its vehicle spawns and exposes tier-aware
+-- wrappers around Ox.CreateVehicle / Ox.SpawnVehicle. Start ox_core before this
+-- resource so the hooks catch vehicles spawned during boot.
