@@ -658,3 +658,17 @@ RegisterCommand(Config.Command, function()
 end, false)
 
 TriggerEvent('chat:addSuggestion', '/' .. Config.Command, Config.CommandHelp)
+
+---An autosave failed. Anyone who can edit needs to know immediately, because
+---the edits are still in memory and will be lost on restart.
+RegisterNetEvent('vehicleeditor:saveFailed', function(err)
+    if not Menu.state or not Menu.state.canEdit then return end
+
+    lib.notify({
+        title = 'Vehicle Editor',
+        description = ('Could not save handling.meta — edits will be lost on restart.\n%s\nRun vehedit_diag in the server console.')
+            :format(err or 'unknown error'),
+        type = 'error',
+        duration = 12000,
+    })
+end)

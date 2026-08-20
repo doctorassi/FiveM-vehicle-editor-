@@ -13,7 +13,13 @@ local function scheduleSave()
     saveScheduled = true
     SetTimeout(1000, function()
         saveScheduled = false
-        Meta.Save()
+
+        local ok = Meta.Save()
+        if not ok then
+            -- "Edits are always saved" is the whole point, so a failed autosave
+            -- is told to everyone who can act on it rather than only the log.
+            TriggerClientEvent('vehicleeditor:saveFailed', -1, Meta.lastError)
+        end
     end)
 end
 
@@ -111,7 +117,13 @@ lib.callback.register('vehicleeditor:save', function(source)
     if not Store.CanEdit(source) then
         return false, 'You do not have permission to edit vehicles.'
     end
-    return Meta.Save(), nil
+
+    local ok, err = Meta.Save()
+    if not ok then
+        return false, ('Could not write data/handling.meta: %s'):format(err or 'unknown error')
+    end
+
+    return true, nil
 end)
 
 ---Throw away in-memory state and re-read the file from disk.
@@ -186,6 +198,21 @@ RegisterCommand('vehedit_save', function(source)
     print('[vehicle-editor] ' .. (Meta.Save() and 'saved data/handling.meta' or 'save failed'))
 end, false)
 
+RegisterCommand('vehedit_diag', function(source)
+    if not Store.CanEdit(source) then
+        return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
+    end
+
+    print('[vehicle-editor] --- save diagnostics ---')
+    for _, line in ipairs(Meta.Diagnose()) do
+        print('[vehicle-editor]   ' .. line)
+    end
+
+    print('[vehicle-editor] attempting a write now...')
+    local ok, err = Meta.Save()
+    print(('[vehicle-editor] result: %s'):format(ok and 'SUCCESS' or ('FAILED — ' .. tostring(err))))
+end, false)
+
 RegisterCommand('vehedit_reload', function(source)
     if not Store.CanEdit(source) then
         return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
@@ -225,6 +252,12 @@ AddEventHandler('onResourceStart', function(resource)
     end
 
     OxCore.Init()
+
+    -- Prove the file is writable at boot rather than discovering it on the
+    -- first edit, when an admin has already done work that cannot be kept.
+    if Config.WriteMetaOnSave and not Meta.Save() then
+        print('[vehicle-editor] startup write test FAILED — edits will not survive a restart until this is fixed.')
+    end
 
     broadcastSync()
 end)

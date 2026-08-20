@@ -519,6 +519,118 @@ test('vectors are written with x/y/z attributes', function()
 end)
 
 --------------------------------------------------------------------------------
+print('\nsaving to disk')
+--------------------------------------------------------------------------------
+
+---Swallow the diagnostic block so a deliberate failure does not spam the run.
+local function quietly(fn)
+    local realPrint = print
+    local captured = {}
+    print = function(...) captured[#captured + 1] = table.concat({ ... }, ' ') end
+
+    local ok, result, extra = pcall(fn)
+
+    print = realPrint
+    if not ok then error(result, 2) end
+
+    return result, extra, captured
+end
+
+local SCRATCH = os.getenv('VEHEDIT_SCRATCH') or '/tmp/vehedit-test'
+
+local function scrub()
+    os.execute(('rm -rf "%s"'):format(SCRATCH))
+end
+
+test('a save that silently writes nothing is caught by verification', function()
+    seedFleet()
+
+    local realSave = SaveResourceFile
+    -- Claims success, writes nothing -- the exact failure mode a return value
+    -- alone cannot detect.
+    SaveResourceFile = function() return true end
+
+    local ok = quietly(function() return Meta.Save() end)
+
+    SaveResourceFile = realSave
+    assertEqual(ok, false, 'the lie was caught')
+    assertTrue(Meta.lastError, 'an error was recorded')
+end)
+
+test('a hard failure reports rather than throwing', function()
+    seedFleet()
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return false end
+
+    local ok, err = quietly(function() return Meta.Save() end)
+
+    SaveResourceFile = realSave
+    assertEqual(ok, false, 'reported failure')
+    assertTrue(err, 'gave a reason')
+end)
+
+test('the direct write fallback creates a missing data directory', function()
+    scrub()
+    seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.23)
+
+    -- A resource folder that exists but has no `data` subdirectory: the case
+    -- SaveResourceFile cannot handle, because it will not create one.
+    os.execute(('mkdir -p "%s"'):format(SCRATCH))
+
+    local realSave, realPath = SaveResourceFile, GetResourcePath
+    SaveResourceFile = function() return false end
+    GetResourcePath = function() return SCRATCH end
+
+    local ok = quietly(function() return Meta.Save() end)
+
+    SaveResourceFile, GetResourcePath = realSave, realPath
+    assertEqual(ok, true, 'the fallback wrote the file')
+
+    local file = io.open(SCRATCH .. '/data/handling.meta', 'rb')
+    assertTrue(file, 'the file exists on disk')
+
+    local contents = file:read('a')
+    file:close()
+
+    assertTrue(contents:find('<CHandlingDataMgr>', 1, true), 'it is a handling file')
+    assertTrue(contents:find('SULTAN', 1, true), 'it contains the tuned vehicle')
+
+    -- And it round-trips, so a restart would restore the edit.
+    local tunes = Meta.Parse(contents)
+    assertClose(tunes['sultan'].values.fBrakeForce, 1.23, 1e-9, 'edit survived')
+
+    scrub()
+end)
+
+test('a genuinely unwritable location fails cleanly', function()
+    seedFleet()
+
+    local realSave, realPath = SaveResourceFile, GetResourcePath
+    SaveResourceFile = function() return false end
+    GetResourcePath = function() return '/proc/nonexistent-vehedit' end
+
+    local ok, err = quietly(function() return Meta.Save() end)
+
+    SaveResourceFile, GetResourcePath = realSave, realPath
+    assertEqual(ok, false, 'failed')
+    assertTrue(err and #err > 0, 'explained why')
+end)
+
+test('diagnostics name the resource and the target file', function()
+    local realPath = GetResourcePath
+    GetResourcePath = function() return SCRATCH end
+
+    local lines = table.concat(Meta.Diagnose(), '\n')
+
+    GetResourcePath = realPath
+    assertTrue(lines:find('resource name', 1, true), 'names the resource')
+    assertTrue(lines:find('target file', 1, true), 'names the target file')
+    assertTrue(lines:find(SCRATCH, 1, true), 'shows the resolved path')
+end)
+
+--------------------------------------------------------------------------------
 print('\nox_core integration')
 --------------------------------------------------------------------------------
 

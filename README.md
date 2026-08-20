@@ -88,6 +88,7 @@ dialog also offers to restore the vanilla value.
 | `vehedit_autoall` | Roll every configured vehicle at its own tier |
 | `vehedit_save` | Write `data/handling.meta` now |
 | `vehedit_reload` | Re-read `data/handling.meta` from disk |
+| `vehedit_diag` | Report why saving is failing, then attempt a write |
 
 ## Configuration
 
@@ -225,6 +226,26 @@ Because the game only reads `handling.meta` when the resource starts, the editor
 also pushes every saved value through the handling natives on all clients. A
 save is live within one sweep (`Config.ApplyInterval`, 750 ms by default), and
 the same values are already in the file for the next restart.
+
+### If saving fails
+
+The editor writes at boot, so a permissions problem shows up immediately rather
+than after you have done work that cannot be kept. On failure it prints a
+diagnostic naming the resource path, the target file, and whether the folder is
+readable and writable, and every admin in game gets a notification — edits stay
+in memory but would be lost on restart.
+
+Saving is attempted twice: first through `SaveResourceFile`, then, if that fails
+or writes nothing, directly through the filesystem, which also creates the `data`
+folder if it is missing. Run `vehedit_diag` in the server console for the full
+report. The usual causes are:
+
+- **No `data` folder** — the direct write creates it; if that fails too, make one
+  by hand inside the resource.
+- **The resource folder is not writable by FXServer** — on Linux,
+  `chown -R fxserver:fxserver <resource folder>`.
+- **The resource is on a read-only mount, inside a zip, or escrow-protected** —
+  writing is not possible; move it to a normal writable folder.
 
 ### Notes and limits
 

@@ -317,17 +317,197 @@ function Meta.Load()
     return loaded
 end
 
----Write the store out to data/handling.meta.
----@return boolean ok
-function Meta.Save()
-    local xml = Meta.Build(Meta.preserved)
-    local ok = SaveResourceFile(RESOURCE, META_PATH, xml, -1)
+--------------------------------------------------------------------------------
+-- Writing to disk
+--------------------------------------------------------------------------------
+-- SaveResourceFile is the normal route, but it fails silently for several
+-- unrelated reasons: a missing `data` directory (it does not create one), a
+-- read-only or wrong-owner resource folder, or a build where it simply refuses
+-- a subdirectory. Rather than guess, every route is attempted in turn, the
+-- result is verified by reading the file back, and a failure reports exactly
+-- which step failed and why.
 
-    if ok then
-        Store.debugPrint('wrote ' .. META_PATH)
-    else
-        print(('[vehicle-editor] FAILED to write %s -- is the resource folder writable?'):format(META_PATH))
+local SEPARATOR = package.config:sub(1, 1)
+local IS_WINDOWS = SEPARATOR == '\\'
+
+---Last failure reason, surfaced to the menu so a broken save is not console-only.
+Meta.lastError = nil
+
+---Absolute path of the resource folder, or nil when the native is unavailable.
+---@return string?
+local function resourceDirectory()
+    if not GetResourcePath then return nil end
+
+    local ok, path = pcall(GetResourcePath, RESOURCE)
+    if not ok or type(path) ~= 'string' or path == '' then return nil end
+
+    return (path:gsub('[/\\]+$', ''))
+end
+
+---@return string? file, string? directory
+local function absolutePaths()
+    local base = resourceDirectory()
+    if not base then return nil, nil end
+
+    local directory = base .. SEPARATOR .. 'data'
+    return directory .. SEPARATOR .. 'handling.meta', directory
+end
+
+---Best-effort mkdir. SaveResourceFile will not create the directory itself and
+---there is no filesystem library available, so this shells out.
+---@param directory string
+local function ensureDirectory(directory)
+    -- stderr is suppressed: a failure here is not fatal (the retry below
+    -- reports properly) and the shell's message would only spam the console.
+    local command = IS_WINDOWS
+        and ('mkdir "%s" 2>nul'):format(directory)
+        or ('mkdir -p "%s" 2>/dev/null'):format(directory)
+
+    pcall(os.execute, command)
+end
+
+---Write through the Lua io library, bypassing SaveResourceFile entirely.
+---@param xml string
+---@return boolean ok, string? err
+local function directWrite(xml)
+    local path, directory = absolutePaths()
+    if not path then
+        return false, 'GetResourcePath is unavailable, cannot resolve an absolute path'
     end
 
-    return ok and true or false
+    local file, err = io.open(path, 'wb')
+
+    if not file then
+        -- Most likely the `data` directory is missing; make it and retry once.
+        ensureDirectory(directory)
+        file, err = io.open(path, 'wb')
+    end
+
+    if not file then
+        return false, ('io.open("%s") failed: %s'):format(path, tostring(err))
+    end
+
+    local written, writeErr = file:write(xml)
+    file:close()
+
+    if not written then
+        return false, ('write to "%s" failed: %s'):format(path, tostring(writeErr))
+    end
+
+    return true, nil
+end
+
+---Confirm the bytes actually landed, rather than trusting a return value.
+---@param xml string
+---@return boolean
+local function readBackMatches(xml)
+    local raw = LoadResourceFile(RESOURCE, META_PATH)
+    if raw and #raw == #xml then return true end
+
+    -- LoadResourceFile can miss a file written outside the resource system, so
+    -- fall back to reading the absolute path directly.
+    local path = absolutePaths()
+    if not path then return false end
+
+    local file = io.open(path, 'rb')
+    if not file then return false end
+
+    local contents = file:read('a')
+    file:close()
+
+    return contents ~= nil and #contents == #xml
+end
+
+---Collect everything useful about why writing might be failing.
+---@return string[]
+function Meta.Diagnose()
+    local lines = {}
+    local function add(format, ...) lines[#lines + 1] = (format):format(...) end
+
+    add('resource name     : %s', RESOURCE)
+    add('resource path     : %s', resourceDirectory() or '<GetResourcePath unavailable>')
+
+    local path, directory = absolutePaths()
+    add('target file       : %s', path or '<unknown>')
+
+    add('read access       : %s', LoadResourceFile(RESOURCE, META_PATH) and 'ok' or 'FAILED (file missing or unreadable)')
+
+    if directory then
+        local probePath = directory .. SEPARATOR .. '.vehedit_write_test'
+        local probe, probeErr = io.open(probePath, 'wb')
+
+        if probe then
+            probe:write('test')
+            probe:close()
+            os.remove(probePath)
+            add('data/ writable    : yes')
+        else
+            add('data/ writable    : NO (%s)', tostring(probeErr))
+
+            local base = resourceDirectory()
+            local rootProbe = base and io.open(base .. SEPARATOR .. '.vehedit_write_test', 'wb')
+            if rootProbe then
+                rootProbe:close()
+                os.remove(base .. SEPARATOR .. '.vehedit_write_test')
+                add('resource writable : yes -- the "data" folder is missing, not a permission problem')
+            else
+                add('resource writable : NO -- the whole resource folder is read-only to the server process')
+            end
+        end
+    end
+
+    add('last error        : %s', Meta.lastError or 'none')
+
+    return lines
+end
+
+local function reportFailure()
+    print('[vehicle-editor] ============================================================')
+    print(('[vehicle-editor] FAILED to write %s'):format(META_PATH))
+    print('[vehicle-editor] Edits are held in memory but will be LOST on restart.')
+    print('[vehicle-editor] ')
+
+    for _, line in ipairs(Meta.Diagnose()) do
+        print('[vehicle-editor]   ' .. line)
+    end
+
+    print('[vehicle-editor] ')
+    print('[vehicle-editor] Common fixes:')
+    print(('[vehicle-editor]   * create a "data" folder inside the %s resource'):format(RESOURCE))
+    print('[vehicle-editor]   * make the resource folder writable by the user running FXServer')
+    print('[vehicle-editor]   * on Linux:  chown -R fxserver:fxserver <resource folder>')
+    print('[vehicle-editor]   * a resource on a read-only mount or inside a zip cannot be written to')
+    print('[vehicle-editor] Run  vehedit_diag  in the console for this report at any time.')
+    print('[vehicle-editor] ============================================================')
+end
+
+---Write the store out to data/handling.meta.
+---@return boolean ok, string? err
+function Meta.Save()
+    local xml = Meta.Build(Meta.preserved)
+
+    -- Pass the explicit length rather than -1; some builds mishandle the
+    -- sentinel and write nothing while still reporting success.
+    local saved = SaveResourceFile(RESOURCE, META_PATH, xml, #xml)
+
+    if saved and readBackMatches(xml) then
+        Meta.lastError = nil
+        Store.debugPrint('wrote ' .. META_PATH)
+        return true, nil
+    end
+
+    -- SaveResourceFile did not do it. Try the filesystem directly, which also
+    -- creates the data directory if that was the problem.
+    local ok, err = directWrite(xml)
+
+    if ok and readBackMatches(xml) then
+        Meta.lastError = nil
+        print(('[vehicle-editor] wrote %s directly (SaveResourceFile refused it)'):format(META_PATH))
+        return true, nil
+    end
+
+    Meta.lastError = err or 'SaveResourceFile and the direct write both failed verification'
+    reportFailure()
+
+    return false, Meta.lastError
 end
