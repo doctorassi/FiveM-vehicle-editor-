@@ -318,6 +318,20 @@ call a nil value`.
 No shipped file references `io`, `os` or `package` at all, and `tests/run.lua`
 loads the resource with all three removed to prove it comes up whole.
 
+The same applies to whole scripts. A server script that fails to load — or never
+reaches the deployment at all — is not an error in FiveM: the globals it defines
+are simply `nil`, and the first caller dies somewhere unrelated. The server
+therefore checks on startup that every module it depends on is present and
+reports what is missing by name, instead of crashing later:
+
+```
+[vehicle-editor] NOT STARTING — the resource did not load completely:
+  - State is missing — server/meta.lua did not load
+```
+
+Persistence lives in `server/meta.lua` rather than a file of its own for the
+same reason: one fewer script for a deployment to miss.
+
 ## Tests
 
 The pure logic — unit conversion, clamping, tier rolls and the `handling.meta`
@@ -347,8 +361,7 @@ client/originals.lua  vanilla snapshot via a throwaway vehicle
 client/apply.lua      live application sweep over the vehicle pool
 client/menu.lua       ox_lib menus
 server/store.lua      authoritative state, validation, tier rolls
-server/state.lua      tunes.json — the save file
-server/meta.lua       handling.meta writer, parser and diagnostics
+server/meta.lua       persistence — tunes.json state, handling.meta, diagnostics
 server/oxcore.lua     optional ox_core hooks and exports
 server/main.lua       callbacks, autosave, startup load
 tests/                offline test suite

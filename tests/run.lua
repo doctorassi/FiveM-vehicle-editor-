@@ -675,6 +675,10 @@ test('the resource loads in a runtime without package, io or os', function()
     for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'BuildEntry', 'Diagnose', 'HandlingName' }) do
         assertEqual(type(Meta[name]), 'function', 'Meta.' .. name .. ' is defined')
     end
+
+    for _, name in ipairs({ 'Save', 'Load', 'Build' }) do
+        assertEqual(type(State[name]), 'function', 'State.' .. name .. ' is defined')
+    end
 end)
 
 test('saving works with no io library present', function()
@@ -694,11 +698,32 @@ test('saving works with no io library present', function()
     assertClose(tunes['sultan'].values.fBrakeForce, 1.31, 1e-9, 'edit written')
 end)
 
+test('State is defined by the same file as Meta', function()
+    -- Merged deliberately: a separate script that never reaches a deployment is
+    -- not an error in FiveM, it just leaves a nil global that kills the first
+    -- caller somewhere unrelated. One file means one thing to go missing.
+    local realState, realMeta = State, Meta
+    State, Meta = nil, nil
+
+    dofile('server/meta.lua')
+
+    local bothDefined = type(State) == 'table' and type(Meta) == 'table'
+        and type(State.Save) == 'function' and type(Meta.Save) == 'function'
+
+    if not bothDefined then State, Meta = realState, realMeta end
+    assertTrue(bothDefined, 'loading server/meta.lua defines both Meta and State')
+end)
+
 test('every function the server calls on Meta, Store and OxCore exists', function()
     -- Cheap guard against another partial load going unnoticed.
-    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'Diagnose' }) do
+    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'Diagnose', 'ProbeWrite' }) do
         assertEqual(type(Meta[name]), 'function', 'Meta.' .. name)
     end
+
+    for _, name in ipairs({ 'Save', 'Load', 'Build' }) do
+        assertEqual(type(State[name]), 'function', 'State.' .. name)
+    end
+    assertTrue(State.PATH, 'State.PATH')
 
     for _, name in ipairs({ 'CanEdit', 'Ensure', 'Get', 'SetValue', 'ClearValue', 'SetTier',
                             'SetMod', 'ClearMod', 'Randomize', 'RandomizeAll', 'Reset',
@@ -1002,6 +1027,87 @@ test('the ox_core exports are registered', function()
                             'GetVehicleTune', 'GetVehicleTier' }) do
         assertTrue(harness.exported[name], name .. ' export')
     end
+end)
+
+--------------------------------------------------------------------------------
+print('\nstartup')
+--------------------------------------------------------------------------------
+
+---Load server/main.lua fresh and return everything it printed.
+local function bootMain()
+    harness.handlers = {}
+    harness.files = {}
+
+    local output = {}
+    local realPrint = print
+    print = function(text) output[#output + 1] = tostring(text) end
+
+    local ok, err = pcall(dofile, 'server/main.lua')
+    if ok then
+        ok, err = pcall(harness.fire, 'onResourceStart', 'fivem-vehicle-editor')
+    end
+
+    print = realPrint
+    return ok, err, table.concat(output, '\n')
+end
+
+test('a clean startup comes up and reports it', function()
+    resetStore()
+
+    local ok, err, output = bootMain()
+    assertTrue(ok, 'onResourceStart did not throw: ' .. tostring(err))
+    assertTrue(output:find('ready', 1, true), 'announced readiness:\n' .. output)
+    assertEqual(output:find('NOT STARTING'), nil, 'no load complaint')
+end)
+
+test('a missing module is reported by name instead of crashing later', function()
+    -- Reproduces the reported failure: server/state.lua never reached the
+    -- deployment, so State was nil and the first autosave died a second later
+    -- inside a timer, far from the actual cause.
+    resetStore()
+
+    local realState = State
+    State = nil
+
+    local ok, err, output = bootMain()
+
+    State = realState
+
+    assertTrue(ok, 'startup did not throw: ' .. tostring(err))
+    assertTrue(output:find('NOT STARTING', 1, true), 'refused to start:\n' .. output)
+    assertTrue(output:find('State is missing', 1, true), 'named the missing global')
+    assertTrue(output:find('server/meta.lua', 1, true), 'named the file to check')
+end)
+
+test('a half-loaded module is reported too', function()
+    resetStore()
+
+    local realSave = Meta.Save
+    Meta.Save = nil
+
+    local ok, _, output = bootMain()
+
+    Meta.Save = realSave
+
+    assertTrue(ok, 'startup did not throw')
+    assertTrue(output:find('Meta.Save is missing', 1, true), 'named the missing function:\n' .. output)
+    assertTrue(output:find('partially', 1, true), 'explains it loaded partially')
+end)
+
+test('autosave stays quiet when startup was refused', function()
+    resetStore()
+
+    local realState = State
+    State = nil
+
+    local ok = bootMain()
+    State = realState
+    assertTrue(ok, 'no throw at startup')
+
+    -- The command path must not throw either, even though State was nil when
+    -- the resource came up.
+    local command = harness.commands['vehedit_save']
+    assertTrue(command, 'command registered')
 end)
 
 --------------------------------------------------------------------------------

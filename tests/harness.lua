@@ -40,8 +40,16 @@ local function installNatives()
         harness.broadcasts[#harness.broadcasts + 1] = { name = name, target = target, payload = payload }
     end
 
-    AddEventHandler = function() end
-    RegisterCommand = function() end
+    -- Recorded so tests can fire onResourceStart and exercise the real startup
+    -- path, which is where every load-order failure has surfaced.
+    harness.handlers = {}
+    AddEventHandler = function(name, fn)
+        harness.handlers[name] = harness.handlers[name] or {}
+        table.insert(harness.handlers[name], fn)
+    end
+
+    harness.commands = {}
+    RegisterCommand = function(name, fn) harness.commands[name] = fn end
 
     -- ox_core is absent under test, so the integration stays dormant and its
     -- pure helpers can still be exercised.
@@ -54,12 +62,22 @@ local function installNatives()
         __call = function(_, name, fn) harness.exported[name] = fn end,
     })
 
+    harness.callbacks = {}
     lib = {
         callback = {
-            register = function() end,
+            register = function(name, fn) harness.callbacks[name] = fn end,
         },
         print = { info = function() end },
     }
+end
+
+---Fire every handler registered for an event.
+function harness.fire(event, ...)
+    local handlers = harness.handlers[event]
+    if not handlers then return 0 end
+
+    for i = 1, #handlers do handlers[i](...) end
+    return #handlers
 end
 
 ---Load the resource. `server` = false loads only the shared half.
@@ -72,7 +90,6 @@ function harness.load(includeServer)
 
     if includeServer ~= false then
         dofile(ROOT .. 'server/store.lua')
-        dofile(ROOT .. 'server/state.lua')
         dofile(ROOT .. 'server/meta.lua')
         dofile(ROOT .. 'server/oxcore.lua')
     end

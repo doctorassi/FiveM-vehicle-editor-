@@ -4,11 +4,64 @@
 
 local saveScheduled = false
 
+--------------------------------------------------------------------------------
+-- Load check
+--------------------------------------------------------------------------------
+-- A server script that fails to load, or never reaches the deployment at all,
+-- is not an error in FiveM: the globals it defines are simply nil, and the
+-- first caller dies somewhere unrelated with "attempt to index a nil value".
+-- Checking up front turns that into one actionable line naming the file.
+
+local REQUIRED = {
+    { global = 'Store',  file = 'server/store.lua',  fns = { 'CanEdit', 'BuildSync', 'ResolveValues' } },
+    { global = 'Meta',   file = 'server/meta.lua',   fns = { 'Save', 'Load', 'Build', 'Diagnose' } },
+    { global = 'State',  file = 'server/meta.lua',   fns = { 'Save', 'Load' } },
+    { global = 'OxCore', file = 'server/oxcore.lua', fns = { 'Init', 'BuildPolicy' } },
+    { global = 'Fields', file = 'shared/fields.lua', fns = {} },
+    { global = 'Util',   file = 'shared/util.lua',   fns = { 'SanitizeValue', 'RollTier' } },
+    { global = 'Config', file = 'config.lua',        fns = {} },
+}
+
+---@return boolean ok
+local function checkLoaded()
+    local problems = {}
+
+    for i = 1, #REQUIRED do
+        local entry = REQUIRED[i]
+        local value = _G[entry.global]
+
+        if type(value) ~= 'table' then
+            problems[#problems + 1] = ('%s is missing — %s did not load')
+                :format(entry.global, entry.file)
+        else
+            for j = 1, #entry.fns do
+                if type(value[entry.fns[j]]) ~= 'function' then
+                    problems[#problems + 1] = ('%s.%s is missing — %s loaded only partially')
+                        :format(entry.global, entry.fns[j], entry.file)
+                end
+            end
+        end
+    end
+
+    if #problems == 0 then return true end
+
+    print('[vehicle-editor] NOT STARTING — the resource did not load completely:')
+    for i = 1, #problems do print('  - ' .. problems[i]) end
+    print('  Check the console above for an earlier Lua error, and make sure every')
+    print('  file listed in fxmanifest.lua is actually present on the server.')
+
+    return false
+end
+
+---Set once checkLoaded passes; every entry point bails out quietly otherwise
+---rather than throwing on a nil global.
+local ready = false
+
 ---Coalesce rapid edits into a single file write. Every mutation calls this, so
 ---an edit is on disk within a second of being made -- there is no "unsaved"
 ---state to lose.
 local function scheduleSave()
-    if saveScheduled then return end
+    if not ready or saveScheduled then return end
 
     saveScheduled = true
     SetTimeout(1000, function()
@@ -250,6 +303,9 @@ end, false)
 
 AddEventHandler('onResourceStart', function(resource)
     if resource ~= GetCurrentResourceName() then return end
+
+    ready = checkLoaded()
+    if not ready then return end
 
     -- Lua 5.4 seeds itself when called with no arguments. Deliberately not
     -- os.time(): this runtime does not ship the full standard library, and a
