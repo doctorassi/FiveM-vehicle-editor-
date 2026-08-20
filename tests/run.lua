@@ -715,6 +715,155 @@ test('every function the server calls on Meta, Store and OxCore exists', functio
 end)
 
 --------------------------------------------------------------------------------
+print('\nstate file')
+--------------------------------------------------------------------------------
+
+test('state round-trips through tunes.json', function()
+    seedFleet()
+    Store.SetTier('adder', 5)
+    Store.SetValue('adder', 'fInitialDriveForce', 0.47)
+    Store.SetMod('adder', 'engine', 3)
+
+    assertEqual(State.Save(), true, 'saved')
+    assertTrue(harness.files['tunes.json'], 'file written')
+
+    Store.tunes = {}
+    assertTrue(State.Load() > 0, 'loaded')
+
+    local entry = Store.Get('adder')
+    assertEqual(entry.tier, 5, 'tier')
+    assertClose(entry.values.fInitialDriveForce, 0.47, 1e-9, 'edit')
+    assertEqual(entry.mods.engine, 3, 'mod override')
+    assertTrue(entry.originals, 'originals')
+    assertTrue(Store.ResolveValues('adder'), 'resolvable after load')
+end)
+
+test('a handling.meta that refuses writes does not lose state', function()
+    -- Exactly the reported failure: handling.meta is declared as a data_file,
+    -- the resource system holds it, and the write never lands -- LoadResourceFile
+    -- keeps returning the original skeleton.
+    seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.33)
+
+    local skeleton = '<?xml version="1.0"?><CHandlingDataMgr><HandlingData></HandlingData></CHandlingDataMgr>'
+    harness.files['handling.meta'] = skeleton
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function(resource, path, data)
+        if path == 'handling.meta' then return true end -- reports success, writes nothing
+        harness.files[path] = data
+        return true
+    end
+
+    local stateOk = State.Save()
+    local metaOk = quietly(function() return Meta.Save() end)
+
+    SaveResourceFile = realSave
+
+    assertEqual(stateOk, true, 'state still saved')
+    assertEqual(metaOk, false, 'meta failure detected')
+    assertEqual(harness.files['handling.meta'], skeleton, 'meta really was not written')
+
+    -- The edit survives a restart regardless.
+    Store.tunes = {}
+    State.Load()
+    assertClose(Store.Get('sultan').values.fBrakeForce, 1.33, 1e-9, 'edit survived')
+end)
+
+test('a repeated handling.meta failure is only reported once', function()
+    seedFleet()
+
+    -- A good save first, so the warn-once latch starts clear regardless of
+    -- what an earlier test left behind.
+    quietly(function() return Meta.Save() end)
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function(_, path, data)
+        if path == 'handling.meta' then return true end
+        harness.files[path] = data
+        return true
+    end
+    harness.files['handling.meta'] = 'stale'
+
+    local count = 0
+    local realPrint = print
+    print = function(text)
+        if tostring(text):find('could not write handling.meta', 1, true) then count = count + 1 end
+    end
+
+    Meta.Save()
+    Meta.Save()
+    Meta.Save()
+
+    print = realPrint
+    SaveResourceFile = realSave
+
+    assertEqual(count, 1, 'warned once, not on every autosave')
+end)
+
+test('the write probe separates a locked file from an unwritable folder', function()
+    -- Folder writable: the scratch file round-trips.
+    assertEqual(Meta.ProbeWrite(), true, 'probe succeeds when writes work')
+
+    -- Folder not writable at all.
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return false end
+    local ok, err = Meta.ProbeWrite()
+    SaveResourceFile = realSave
+
+    assertEqual(ok, false, 'probe fails when nothing can be written')
+    assertTrue(err, 'reports why')
+end)
+
+test('the probe does not leave a populated scratch file behind', function()
+    Meta.ProbeWrite()
+    assertEqual(harness.files['write_probe.tmp'], '', 'scratch file emptied')
+end)
+
+test('state migrates from handling.meta when there is no state file', function()
+    seedFleet()
+    Store.SetTier('sultan', 4)
+    Store.SetValue('sultan', 'fInitialDriveForce', 0.39)
+    Meta.Save()
+
+    -- An install from before the split: handling.meta only.
+    harness.files['tunes.json'] = nil
+    Store.tunes = {}
+
+    assertEqual(State.Load(), 0, 'no state file')
+    assertTrue(Meta.Load() > 0, 'meta read instead')
+    assertClose(Store.Get('sultan').values.fInitialDriveForce, 0.39, 1e-9, 'edit carried over')
+
+    assertEqual(State.Save(), true, 'state written on migration')
+    assertTrue(harness.files['tunes.json'], 'state file now exists')
+
+    quietly(function() return Meta.Save() end)
+end)
+
+test('an unreadable state file is ignored rather than fatal', function()
+    resetStore()
+    harness.files['tunes.json'] = '{ this is not json'
+
+    local loaded = quietly(function() return State.Load() end)
+    assertEqual(loaded, 0, 'nothing loaded')
+    assertEqual(type(State.Load), 'function', 'still callable')
+end)
+
+test('state ignores models no longer in the config', function()
+    seedFleet()
+    State.Save()
+
+    local saved = Config.VehicleByModel['adder']
+    Config.VehicleByModel['adder'] = nil
+
+    Store.tunes = {}
+    State.Load()
+    assertEqual(Store.Get('adder'), nil, 'dropped')
+
+    Config.VehicleByModel['adder'] = saved
+end)
+
+--------------------------------------------------------------------------------
 print('\nox_core integration')
 --------------------------------------------------------------------------------
 

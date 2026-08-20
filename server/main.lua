@@ -8,17 +8,25 @@ local saveScheduled = false
 ---an edit is on disk within a second of being made -- there is no "unsaved"
 ---state to lose.
 local function scheduleSave()
-    if not Config.WriteMetaOnSave or saveScheduled then return end
+    if saveScheduled then return end
 
     saveScheduled = true
     SetTimeout(1000, function()
         saveScheduled = false
 
-        local ok = Meta.Save()
+        -- tunes.json is the source of truth and must succeed.
+        local ok = State.Save()
+
+        -- handling.meta is a bonus that lets the game apply tunes natively at
+        -- startup. It is declared as a data_file, so on some hosts the resource
+        -- system holds it open and the write cannot land. That is reported once
+        -- and then tolerated, because nothing depends on it.
+        if Config.WriteMetaOnSave then Meta.Save() end
+
         if not ok then
             -- "Edits are always saved" is the whole point, so a failed autosave
             -- is told to everyone who can act on it rather than only the log.
-            TriggerClientEvent('vehicleeditor:saveFailed', -1, Meta.lastError)
+            TriggerClientEvent('vehicleeditor:saveFailed', -1, State.lastError)
         end
     end)
 end
@@ -118,10 +126,14 @@ lib.callback.register('vehicleeditor:save', function(source)
         return false, 'You do not have permission to edit vehicles.'
     end
 
-    local ok, err = Meta.Save()
+    local ok, err = State.Save()
     if not ok then
-        return false, ('Could not write data/handling.meta: %s'):format(err or 'unknown error')
+        return false, ('Could not write %s: %s'):format(State.PATH, err or 'unknown error')
     end
+
+    -- Best effort; a host that will not let us write handling.meta does not
+    -- make the save a failure.
+    Meta.Save()
 
     return true, nil
 end)
@@ -133,7 +145,8 @@ lib.callback.register('vehicleeditor:reload', function(source)
     end
 
     Store.tunes = {}
-    local loaded = Meta.Load()
+    local loaded = State.Load()
+    if loaded == 0 then loaded = Meta.Load() end
     broadcastSync()
 
     return true, nil, loaded
@@ -195,7 +208,13 @@ RegisterCommand('vehedit_save', function(source)
     if not Store.CanEdit(source) then
         return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
     end
-    print('[vehicle-editor] ' .. (Meta.Save() and 'saved data/handling.meta' or 'save failed'))
+    local stateOk = State.Save()
+    local metaOk = Meta.Save()
+
+    print(('[vehicle-editor] %s: %s | handling.meta: %s'):format(
+        State.PATH,
+        stateOk and 'saved' or 'FAILED',
+        metaOk and 'saved' or 'not written (see diagnostics above)'))
 end, false)
 
 RegisterCommand('vehedit_diag', function(source)
@@ -219,9 +238,10 @@ RegisterCommand('vehedit_reload', function(source)
     end
 
     Store.tunes = {}
-    local loaded = Meta.Load()
+    local loaded = State.Load()
+    if loaded == 0 then loaded = Meta.Load() end
     broadcastSync()
-    print(('[vehicle-editor] reloaded %d tune(s) from data/handling.meta'):format(loaded))
+    print(('[vehicle-editor] reloaded %d tune(s)'):format(loaded))
 end, false)
 
 --------------------------------------------------------------------------------
@@ -236,7 +256,15 @@ AddEventHandler('onResourceStart', function(resource)
     -- throw here would abort the rest of onResourceStart.
     math.randomseed()
 
-    local loaded = Meta.Load()
+    -- tunes.json first; handling.meta is only read when there is no state file
+    -- yet, which migrates an install from before the split.
+    local loaded = State.Load()
+    local migrated = false
+
+    if loaded == 0 then
+        loaded = Meta.Load()
+        migrated = loaded > 0
+    end
 
     -- Make sure every configured vehicle has a store entry even before it has
     -- been touched, so the menu can list it immediately.
@@ -245,8 +273,13 @@ AddEventHandler('onResourceStart', function(resource)
         Store.Ensure(Config.Vehicles[i].model)
     end
 
-    print(('[vehicle-editor] ready — %d/%d vehicle(s) restored from data/handling.meta')
-        :format(loaded, #Config.Vehicles))
+    print(('[vehicle-editor] ready — %d/%d vehicle(s) restored from %s')
+        :format(loaded, #Config.Vehicles, migrated and 'handling.meta' or State.PATH))
+
+    if migrated then
+        print('[vehicle-editor] migrating state into ' .. State.PATH)
+        State.Save()
+    end
 
     local missing = Store.MissingOriginals()
     if #missing > 0 then

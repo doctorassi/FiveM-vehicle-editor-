@@ -355,25 +355,63 @@ end
 ---Last failure reason, surfaced to the menu so a broken save is not console-only.
 Meta.lastError = nil
 
----Print why a save failed and what to check, without touching the filesystem.
+---Round-trip a scratch file that the manifest does NOT declare.
+---
+---This separates the two failure modes that look identical from the outside:
+---a resource folder the server cannot write into at all, versus a specific file
+---the resource system owns (anything in `files {}` / `data_file`) refusing the
+---write while the folder itself is fine.
+---@return boolean ok, string? err
+function Meta.ProbeWrite()
+    local marker = ('probe-%d-%d'):format(math.random(1, 1e9), math.random(1, 1e9))
+    local path = 'write_probe.tmp'
+
+    local reported = SaveResourceFile(RESOURCE, path, marker, -1)
+    local readBack = LoadResourceFile(RESOURCE, path)
+
+    -- Best effort tidy-up; an empty file left behind is harmless.
+    SaveResourceFile(RESOURCE, path, '', -1)
+
+    if readBack == marker then return true, nil end
+
+    return false, ('wrote %d bytes, read back %s (returned %s)')
+        :format(#marker, readBack and (#readBack .. ' bytes') or 'nothing', tostring(reported))
+end
+
+---Print why a save failed and what to check.
 function Meta.Diagnose()
+    local probeOk, probeErr = Meta.ProbeWrite()
+
     local lines = {
         '[vehicle-editor] save diagnostics',
-        ('  resource name   : %s'):format(tostring(RESOURCE)),
-        ('  target file     : %s'):format(META_PATH),
-        ('  read access     : %s'):format(
-            LoadResourceFile(RESOURCE, META_PATH) and 'ok' or 'no file yet'),
-        ('  last error      : %s'):format(Meta.lastError or 'none'),
+        ('  resource name    : %s'):format(tostring(RESOURCE)),
+        ('  state file       : %s (%s)'):format(
+            State and State.PATH or 'tunes.json',
+            State and (State.lastError or 'ok') or 'unknown'),
+        ('  handling.meta    : %s'):format(Meta.lastError or 'ok'),
+        ('  scratch write    : %s'):format(probeOk and 'ok' or ('FAILED -- ' .. tostring(probeErr))),
     }
 
     if type(GetResourcePath) == 'function' then
         local ok, path = pcall(GetResourcePath, RESOURCE)
-        lines[#lines + 1] = ('  resource path   : %s'):format(ok and tostring(path) or 'unavailable')
+        lines[#lines + 1] = ('  resource path    : %s'):format(ok and tostring(path) or 'unavailable')
     end
 
-    lines[#lines + 1] = '  If this keeps failing, the server process cannot write into the'
-    lines[#lines + 1] = '  resource folder. Check its ownership and permissions, and make sure'
-    lines[#lines + 1] = '  the resource is not running from a read-only mount or an archive.'
+    lines[#lines + 1] = ''
+
+    if probeOk then
+        lines[#lines + 1] = '  The resource folder IS writable -- a scratch file round-tripped fine.'
+        lines[#lines + 1] = '  A failure on handling.meta specifically means the resource system is'
+        lines[#lines + 1] = '  holding that file open because it is declared as a data_file. Nothing'
+        lines[#lines + 1] = '  is lost: your tunes live in ' .. (State and State.PATH or 'tunes.json') .. ' and are applied'
+        lines[#lines + 1] = '  through the handling natives, so the editor works normally. Only the'
+        lines[#lines + 1] = '  native load-at-startup shortcut is unavailable.'
+    else
+        lines[#lines + 1] = '  The server process cannot write into the resource folder at all.'
+        lines[#lines + 1] = '  Check ownership and permissions on it, and make sure the resource is'
+        lines[#lines + 1] = '  not running from a read-only mount or an archive. Until this is fixed'
+        lines[#lines + 1] = '  edits will apply live but will NOT survive a restart.'
+    end
 
     print(table.concat(lines, '\n'))
 end
@@ -384,6 +422,10 @@ end
 ---return value, because SaveResourceFile reports success inconsistently across
 ---builds -- a bad return with a good file, or a good return with no file, are
 ---both possible.
+---True once a handling.meta failure has been reported, so a host where the file
+---is permanently unwritable does not spam the console on every autosave.
+local warned = false
+
 ---@return boolean ok, string? err
 function Meta.Save()
     local xml = Meta.Build(Meta.preserved)
@@ -392,7 +434,11 @@ function Meta.Save()
     local readBack = LoadResourceFile(RESOURCE, META_PATH)
 
     if readBack and #readBack == #xml then
+        if Meta.lastError then
+            print('[vehicle-editor] handling.meta is writable again.')
+        end
         Meta.lastError = nil
+        warned = false
         Store.debugPrint(('wrote %s (%d bytes)'):format(META_PATH, #xml))
         return true, nil
     end
@@ -406,8 +452,14 @@ function Meta.Save()
     end
 
     Meta.lastError = err
-    print('[vehicle-editor] FAILED to save handling.meta: ' .. err)
-    Meta.Diagnose()
+
+    -- Not fatal. State lives in tunes.json and clients apply it through the
+    -- handling natives; only the native load-at-startup shortcut is lost.
+    if not warned then
+        warned = true
+        print('[vehicle-editor] could not write handling.meta: ' .. err)
+        Meta.Diagnose()
+    end
 
     return false, err
 end

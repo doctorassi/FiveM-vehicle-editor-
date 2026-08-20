@@ -583,15 +583,15 @@ local function showMain()
     }
 
     options[#options + 1] = {
-        title = 'Save to handling.meta',
-        description = 'Edits autosave, this forces an immediate write',
+        title = 'Save now',
+        description = 'Edits autosave; this forces an immediate write',
         icon = 'floppy-disk',
         onSelect = function()
             local ok = call('save')
             if ok then
                 lib.notify({
                     title = 'Vehicle Editor',
-                    description = 'Wrote data/handling.meta.',
+                    description = 'Saved.',
                     type = 'success',
                 })
             end
@@ -600,13 +600,13 @@ local function showMain()
     }
 
     options[#options + 1] = {
-        title = 'Reload from handling.meta',
-        description = 'Discard in-memory state and re-read the file',
+        title = 'Reload from disk',
+        description = 'Discard in-memory state and re-read the saved tunes',
         icon = 'rotate',
         onSelect = function()
             local confirm = lib.alertDialog({
                 header = 'Reload from file',
-                content = 'Unsaved in-memory changes are discarded and data/handling.meta is re-read. Continue?',
+                content = 'Unsaved in-memory changes are discarded and the saved tunes are re-read from disk. Continue?',
                 centered = true,
                 cancel = true,
             })

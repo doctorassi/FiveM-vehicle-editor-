@@ -18,7 +18,7 @@ runs.
 - **Automatic generation** — roll the whole fleet at once, each car inside its own tier band.
 - **Per-vehicle rolls** on request, at any tier you pick.
 - **Performance mods** — engine, brakes, transmission, suspension, armour and turbo, with tier defaults and per-vehicle overrides.
-- **Always saved** — every edit autosaves to `handling.meta` and is reloaded on startup.
+- **Always saved** — every edit autosaves to `tunes.json` and is reloaded on startup, with `handling.meta` generated alongside it.
 - **Live application** — saved values take effect immediately for every player, no restart needed.
 - **Server-side authority** — ace-gated, with every value re-validated and clamped on the server.
 - **ox_core support** (optional) — tunes apply the instant an ox_core vehicle spawns, player-owned mods are respected, and tier-aware wrappers around `Ox.CreateVehicle` / `Ox.SpawnVehicle` are exported.
@@ -64,8 +64,8 @@ rather than guessed.
 | Edit *&lt;vehicle&gt;* | Jumps straight to the car you are sitting in or standing next to |
 | Vehicles | Every vehicle in `Config.Vehicles` |
 | Auto-generate every vehicle | Rolls random values for the whole fleet, each at its own tier |
-| Save to handling.meta | Forces an immediate write (edits autosave anyway) |
-| Reload from handling.meta | Throws away in-memory state and re-reads the file |
+| Save now | Forces an immediate write (edits autosave anyway) |
+| Reload from disk | Throws away in-memory state and re-reads the saved tunes |
 
 Inside a vehicle you get its tier, a **Randomize this vehicle** action, a
 performance mods submenu, and the handling fields grouped into Engine,
@@ -86,8 +86,8 @@ dialog also offers to restore the vanilla value.
 | Command | Effect |
 |---|---|
 | `vehedit_autoall` | Roll every configured vehicle at its own tier |
-| `vehedit_save` | Write `handling.meta` now |
-| `vehedit_reload` | Re-read `handling.meta` from disk |
+| `vehedit_save` | Write `tunes.json` and `handling.meta` now |
+| `vehedit_reload` | Re-read the saved tunes from disk |
 | `vehedit_diag` | Report why saving is failing, then attempt a write |
 
 ## Configuration
@@ -200,18 +200,36 @@ translation lives in `Util.ModsToProperties`:
 
 ## How saving works
 
-`handling.meta` at the resource root is both the file the game loads and the
-editor's save file. It is registered in `fxmanifest.lua` as:
+There are two files, and only one of them is the source of truth.
+
+**`tunes.json` — the save file.** A plain JSON file written with
+`SaveResourceFile`, deliberately **not** declared in the manifest. Everything
+lives here: tiers, vanilla originals, edits and mod overrides. It is read on
+startup, and clients apply it through the handling natives.
+
+**`handling.meta` — a bonus.** Registered in `fxmanifest.lua` so the game loads
+tunes natively at resource start:
 
 ```lua
 files { 'handling.meta' }
 data_file 'HANDLING_FILE' 'handling.meta'
 ```
 
-It sits at the root rather than in a subfolder on purpose: `SaveResourceFile`
-cannot create directories, so a missing folder is the usual reason a write
-silently fails. A tune file left at the old `data/handling.meta` path by an
-earlier version is read once on startup and rewritten at the new location.
+The split exists because a file the resource system owns is not reliably
+writable at runtime. Anything in `files {}` / `data_file` can refuse a write —
+`SaveResourceFile` reports success, and the original content is still on disk
+afterwards. When that happens the editor reports it once and carries on:
+**nothing is lost**, because the state is in `tunes.json` and the natives apply
+it anyway. The only thing missing is the native load-at-startup shortcut.
+
+Diagnostics tell the two failure modes apart by round-tripping a scratch file
+the manifest does not declare. If that succeeds, the folder is writable and only
+`handling.meta` is locked; if it fails, the server process cannot write into the
+resource folder at all.
+
+Tunes from an earlier version are migrated automatically: if there is no
+`tunes.json`, `handling.meta` (or the older `data/handling.meta`) is read once
+and written out to the new state file.
 
 Each entry is preceded by an XML comment carrying the editor's own state:
 
@@ -313,9 +331,10 @@ Covers tier rolls staying inside their bands, values being clamped server-side,
 non-finite input being rejected, originals never being overwritten once
 captured, a save-then-restart restoring identical state, foreign entries
 surviving a rewrite, a save being verified by read-back rather than by the
-return value, migration from the old `data/` path, the resource loading in a
-runtime without `package`/`io`/`os`, and the ox_core property mapping and
-ownership rules.
+return value, tunes surviving a restart even when `handling.meta` refuses every
+write, migration from the older layouts, the resource loading in a runtime
+without `package`/`io`/`os`, and the ox_core property mapping and ownership
+rules.
 
 ## Project layout
 
@@ -328,7 +347,8 @@ client/originals.lua  vanilla snapshot via a throwaway vehicle
 client/apply.lua      live application sweep over the vehicle pool
 client/menu.lua       ox_lib menus
 server/store.lua      authoritative state, validation, tier rolls
-server/meta.lua       handling.meta writer and parser
+server/state.lua      tunes.json — the save file
+server/meta.lua       handling.meta writer, parser and diagnostics
 server/oxcore.lua     optional ox_core hooks and exports
 server/main.lua       callbacks, autosave, startup load
 tests/                offline test suite

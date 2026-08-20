@@ -72,6 +72,7 @@ function harness.load(includeServer)
 
     if includeServer ~= false then
         dofile(ROOT .. 'server/store.lua')
+        dofile(ROOT .. 'server/state.lua')
         dofile(ROOT .. 'server/meta.lua')
         dofile(ROOT .. 'server/oxcore.lua')
     end

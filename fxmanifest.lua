@@ -22,6 +22,7 @@ client_scripts {
 
 server_scripts {
     'server/store.lua',
+    'server/state.lua',
     'server/meta.lua',
     'server/oxcore.lua',
     'server/main.lua',
