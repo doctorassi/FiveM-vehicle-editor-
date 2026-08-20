@@ -231,7 +231,13 @@ end, false)
 AddEventHandler('onResourceStart', function(resource)
     if resource ~= GetCurrentResourceName() then return end
 
-    math.randomseed(os.time())
+    -- Guarded: this runtime does not ship the whole standard library, and a
+    -- throw here would abort the rest of onResourceStart.
+    if type(os) == 'table' and type(os.time) == 'function' then
+        math.randomseed(os.time())
+    else
+        pcall(math.randomseed)
+    end
 
     local loaded = Meta.Load()
 

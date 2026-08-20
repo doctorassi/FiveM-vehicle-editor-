@@ -279,6 +279,19 @@ native boundary:
 | `fBrakeBiasFront`, `fTractionBiasFront`, `fSuspensionBiasFront`, `fAntiRollBarBiasFront` | 0–1 | 0–2 |
 | `fDriveBiasFront` | 0–1, with pure FWD/RWD special-cased | front/rear pair |
 
+## Runtime notes
+
+The CitizenFX Lua runtime is not full standard Lua. There is no `package`
+library, and `io` and `os.execute` are not guaranteed. That matters more than it
+sounds: a reference to a missing library at **file scope** raises at load time
+and aborts the rest of that file, so functions declared below the failure are
+silently never defined while the ones above it keep working — the failure only
+shows up later as `attempt to call a nil value`.
+
+Server code here therefore probes every optional library lazily, inside a
+function, behind a `type()` check, and `tests/run.lua` loads the resource with
+`package`, `io` and `os.execute` removed to prove it still comes up whole.
+
 ## Tests
 
 The pure logic — unit conversion, clamping, tier rolls and the `handling.meta`
@@ -291,7 +304,9 @@ lua5.4 tests/run.lua
 Covers tier rolls staying inside their bands, values being clamped server-side,
 non-finite input being rejected, originals never being overwritten once
 captured, a save-then-restart restoring identical state, foreign entries
-surviving a rewrite, and the ox_core property mapping and ownership rules.
+surviving a rewrite, the write fallback creating a missing `data` directory,
+the resource loading in a runtime without `package`/`io`/`os.execute`, and the
+ox_core property mapping and ownership rules.
 
 ## Project layout
 

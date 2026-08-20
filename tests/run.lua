@@ -630,6 +630,65 @@ test('diagnostics name the resource and the target file', function()
     assertTrue(lines:find(SCRATCH, 1, true), 'shows the resolved path')
 end)
 
+test('the resource loads in a runtime without package, io or os.execute', function()
+    -- The CitizenFX Lua runtime has no `package`, and `io` / `os.execute` are
+    -- not guaranteed. A file-scope reference to any of them aborts the rest of
+    -- the file, which silently leaves later functions undefined instead of
+    -- failing loudly -- exactly how Meta.Save once went missing while Meta.Load
+    -- (declared above it) still worked.
+    local realPackage, realIO, realExecute = package, io, os.execute
+
+    package = nil
+    io = nil
+    os.execute = nil
+
+    local ok, err = pcall(dofile, 'server/meta.lua')
+
+    package, io, os.execute = realPackage, realIO, realExecute
+
+    assertTrue(ok, 'server/meta.lua loaded: ' .. tostring(err))
+
+    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'BuildEntry', 'Diagnose', 'HandlingName' }) do
+        assertEqual(type(Meta[name]), 'function', 'Meta.' .. name .. ' is defined')
+    end
+end)
+
+test('saving still works when io is unavailable', function()
+    seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.31)
+
+    local realIO = io
+    io = nil
+
+    local ok = quietly(function() return Meta.Save() end)
+
+    io = realIO
+    assertEqual(ok, true, 'SaveResourceFile carried it alone')
+
+    local tunes = Meta.Parse(harness.files['data/handling.meta'])
+    assertClose(tunes['sultan'].values.fBrakeForce, 1.31, 1e-9, 'edit written')
+end)
+
+test('every function the server calls on Meta and Store exists', function()
+    -- Cheap guard against another partial load going unnoticed.
+    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'Diagnose' }) do
+        assertEqual(type(Meta[name]), 'function', 'Meta.' .. name)
+    end
+
+    for _, name in ipairs({ 'CanEdit', 'Ensure', 'Get', 'SetValue', 'ClearValue', 'SetTier',
+                            'SetMod', 'ClearMod', 'Randomize', 'RandomizeAll', 'Reset',
+                            'ResolveMods', 'ResolveValues', 'BuildSync', 'SetOriginals',
+                            'MissingOriginals', 'debugPrint' }) do
+        assertEqual(type(Store[name]), 'function', 'Store.' .. name)
+    end
+
+    for _, name in ipairs({ 'Init', 'Track', 'Untrack', 'BuildPolicy', 'ShouldApplyMods',
+                            'TierProperties', 'CreateTieredVehicle', 'SpawnTieredVehicle',
+                            'ApplyTierProperties', 'GetVehicleTune', 'GetVehicleTier' }) do
+        assertEqual(type(OxCore[name]), 'function', 'OxCore.' .. name)
+    end
+end)
+
 --------------------------------------------------------------------------------
 print('\nox_core integration')
 --------------------------------------------------------------------------------

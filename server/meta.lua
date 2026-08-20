@@ -327,16 +327,30 @@ end
 -- result is verified by reading the file back, and a failure reports exactly
 -- which step failed and why.
 
-local SEPARATOR = package.config:sub(1, 1)
-local IS_WINDOWS = SEPARATOR == '\\'
+-- NOTHING in this section may run at file scope beyond plain assignments.
+-- The CitizenFX Lua runtime does not provide the full standard library -- there
+-- is no `package`, and `io` / `os.execute` are not guaranteed either -- and a
+-- load-time error here would abort the rest of this file, leaving Meta.Save
+-- undefined while Meta.Load (declared above) still exists. Every optional
+-- library is therefore probed lazily, inside a function, behind a type check.
 
 ---Last failure reason, surfaced to the menu so a broken save is not console-only.
 Meta.lastError = nil
 
+---@return boolean
+local function hasIO()
+    return type(io) == 'table' and type(io.open) == 'function'
+end
+
+---@return boolean
+local function hasShell()
+    return type(os) == 'table' and type(os.execute) == 'function'
+end
+
 ---Absolute path of the resource folder, or nil when the native is unavailable.
 ---@return string?
 local function resourceDirectory()
-    if not GetResourcePath then return nil end
+    if type(GetResourcePath) ~= 'function' then return nil end
 
     local ok, path = pcall(GetResourcePath, RESOURCE)
     if not ok or type(path) ~= 'string' or path == '' then return nil end
@@ -344,22 +358,37 @@ local function resourceDirectory()
     return (path:gsub('[/\\]+$', ''))
 end
 
+---Derive the separator from the path itself rather than from `package.config`,
+---which does not exist in this runtime.
+---@param path string
+---@return string separator, boolean isWindows
+local function separatorFor(path)
+    if path:find('\\', 1, true) then return '\\', true end
+    return '/', false
+end
+
 ---@return string? file, string? directory
 local function absolutePaths()
     local base = resourceDirectory()
     if not base then return nil, nil end
 
-    local directory = base .. SEPARATOR .. 'data'
-    return directory .. SEPARATOR .. 'handling.meta', directory
+    local separator = separatorFor(base)
+    local directory = base .. separator .. 'data'
+
+    return directory .. separator .. 'handling.meta', directory
 end
 
 ---Best-effort mkdir. SaveResourceFile will not create the directory itself and
----there is no filesystem library available, so this shells out.
+---there is no filesystem library available, so this shells out when it can.
 ---@param directory string
 local function ensureDirectory(directory)
+    if not hasShell() then return end
+
+    local _, isWindows = separatorFor(directory)
+
     -- stderr is suppressed: a failure here is not fatal (the retry below
     -- reports properly) and the shell's message would only spam the console.
-    local command = IS_WINDOWS
+    local command = isWindows
         and ('mkdir "%s" 2>nul'):format(directory)
         or ('mkdir -p "%s" 2>/dev/null'):format(directory)
 
@@ -370,6 +399,10 @@ end
 ---@param xml string
 ---@return boolean ok, string? err
 local function directWrite(xml)
+    if not hasIO() then
+        return false, 'the io library is unavailable, cannot write directly'
+    end
+
     local path, directory = absolutePaths()
     if not path then
         return false, 'GetResourcePath is unavailable, cannot resolve an absolute path'
@@ -406,6 +439,8 @@ local function readBackMatches(xml)
 
     -- LoadResourceFile can miss a file written outside the resource system, so
     -- fall back to reading the absolute path directly.
+    if not hasIO() then return false end
+
     local path = absolutePaths()
     if not path then return false end
 
@@ -432,23 +467,34 @@ function Meta.Diagnose()
 
     add('read access       : %s', LoadResourceFile(RESOURCE, META_PATH) and 'ok' or 'FAILED (file missing or unreadable)')
 
-    if directory then
-        local probePath = directory .. SEPARATOR .. '.vehedit_write_test'
+    if not hasIO() then
+        add('io library        : UNAVAILABLE -- only SaveResourceFile can be used')
+    elseif directory then
+        local separator = separatorFor(directory)
+        local probePath = directory .. separator .. '.vehedit_write_test'
         local probe, probeErr = io.open(probePath, 'wb')
+
+        local function removeProbe(target)
+            if type(os) == 'table' and type(os.remove) == 'function' then
+                pcall(os.remove, target)
+            end
+        end
 
         if probe then
             probe:write('test')
             probe:close()
-            os.remove(probePath)
+            removeProbe(probePath)
             add('data/ writable    : yes')
         else
             add('data/ writable    : NO (%s)', tostring(probeErr))
 
             local base = resourceDirectory()
-            local rootProbe = base and io.open(base .. SEPARATOR .. '.vehedit_write_test', 'wb')
+            local rootPath = base and (base .. separator .. '.vehedit_write_test')
+            local rootProbe = rootPath and io.open(rootPath, 'wb')
+
             if rootProbe then
                 rootProbe:close()
-                os.remove(base .. SEPARATOR .. '.vehedit_write_test')
+                removeProbe(rootPath)
                 add('resource writable : yes -- the "data" folder is missing, not a permission problem')
             else
                 add('resource writable : NO -- the whole resource folder is read-only to the server process')
