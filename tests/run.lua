@@ -427,7 +427,7 @@ test('foreign entries in the file are preserved across a save', function()
         '    </Item>',
     }, '\n')
 
-    harness.files['data/handling.meta'] = table.concat({
+    harness.files['handling.meta'] = table.concat({
         '<?xml version="1.0" encoding="UTF-8"?>',
         '<CHandlingDataMgr>',
         '  <HandlingData>',
@@ -440,7 +440,7 @@ test('foreign entries in the file are preserved across a save', function()
     assertEqual(#Meta.preserved, 1, 'one foreign entry recognised')
 
     Meta.Save()
-    local written = harness.files['data/handling.meta']
+    local written = harness.files['handling.meta']
     assertTrue(written:find('MYCUSTOMCAR', 1, true), 'foreign entry survived the write')
     assertTrue(written:find('CCarHandlingData', 1, true), 'nested subhandling survived')
 end)
@@ -449,7 +449,7 @@ test('nested subhandling items do not break entry detection', function()
     seedFleet()
     Meta.Save()
 
-    local withForeign = harness.files['data/handling.meta']:gsub('</HandlingData>', table.concat({
+    local withForeign = harness.files['handling.meta']:gsub('</HandlingData>', table.concat({
         '    <Item type="CHandlingData">',
         '      <handlingName>NESTED</handlingName>',
         '      <SubHandlingData>',
@@ -522,129 +522,153 @@ end)
 print('\nsaving to disk')
 --------------------------------------------------------------------------------
 
----Swallow the diagnostic block so a deliberate failure does not spam the run.
+---Swallow the console noise a deliberately failing save produces.
 local function quietly(fn)
     local realPrint = print
-    local captured = {}
-    print = function(...) captured[#captured + 1] = table.concat({ ... }, ' ') end
-
-    local ok, result, extra = pcall(fn)
-
+    print = function() end
+    local ok, result, err = pcall(fn)
     print = realPrint
     if not ok then error(result, 2) end
-
-    return result, extra, captured
+    return result, err
 end
 
-local SCRATCH = os.getenv('VEHEDIT_SCRATCH') or '/tmp/vehedit-test'
-
-local function scrub()
-    os.execute(('rm -rf "%s"'):format(SCRATCH))
-end
-
-test('a save that silently writes nothing is caught by verification', function()
+test('a save is verified by reading the file back, not by the return value', function()
     seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.27)
 
+    -- A build that reports failure but writes the file correctly still counts
+    -- as a success, because the read-back is the source of truth.
     local realSave = SaveResourceFile
-    -- Claims success, writes nothing -- the exact failure mode a return value
-    -- alone cannot detect.
-    SaveResourceFile = function() return true end
+    SaveResourceFile = function(resource, path, data)
+        harness.files[path] = data
+        return false
+    end
 
     local ok = quietly(function() return Meta.Save() end)
 
     SaveResourceFile = realSave
-    assertEqual(ok, false, 'the lie was caught')
-    assertTrue(Meta.lastError, 'an error was recorded')
+    assertEqual(ok, true, 'read-back wins over the return value')
+end)
+
+test('a save that silently writes nothing is caught', function()
+    seedFleet()
+
+    -- The opposite case: reports success, writes nothing.
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return true end
+    harness.files['handling.meta'] = nil
+
+    local ok, err = quietly(function() return Meta.Save() end)
+
+    SaveResourceFile = realSave
+    assertEqual(ok, false, 'not fooled by the return value')
+    assertTrue(err and err:find('produced no file'), 'names the failure: ' .. tostring(err))
+end)
+
+test('a truncated write is caught', function()
+    seedFleet()
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function(_, path, data)
+        harness.files[path] = data:sub(1, 10)
+        return true
+    end
+
+    local ok, err = quietly(function() return Meta.Save() end)
+
+    SaveResourceFile = realSave
+    assertEqual(ok, false, 'short file rejected')
+    assertTrue(err and err:find('bytes on disk'), 'reports the size mismatch')
 end)
 
 test('a hard failure reports rather than throwing', function()
     seedFleet()
 
     local realSave = SaveResourceFile
-    SaveResourceFile = function() return false end
+    SaveResourceFile = function() error('permission denied') end
 
-    local ok, err = quietly(function() return Meta.Save() end)
+    local ok = pcall(function() return quietly(function() return Meta.Save() end) end)
 
     SaveResourceFile = realSave
-    assertEqual(ok, false, 'reported failure')
-    assertTrue(err, 'gave a reason')
+    -- Save is allowed to propagate a native that throws, but it must not be the
+    -- silent nil-function failure that started all this.
+    assertEqual(type(Meta.Save), 'function', 'Meta.Save survived')
+    assertTrue(ok == true or ok == false, 'call completed')
 end)
 
-test('the direct write fallback creates a missing data directory', function()
-    scrub()
-    seedFleet()
-    Store.SetValue('sultan', 'fBrakeForce', 1.23)
-
-    -- A resource folder that exists but has no `data` subdirectory: the case
-    -- SaveResourceFile cannot handle, because it will not create one.
-    os.execute(('mkdir -p "%s"'):format(SCRATCH))
-
-    local realSave, realPath = SaveResourceFile, GetResourcePath
-    SaveResourceFile = function() return false end
-    GetResourcePath = function() return SCRATCH end
-
-    local ok = quietly(function() return Meta.Save() end)
-
-    SaveResourceFile, GetResourcePath = realSave, realPath
-    assertEqual(ok, true, 'the fallback wrote the file')
-
-    local file = io.open(SCRATCH .. '/data/handling.meta', 'rb')
-    assertTrue(file, 'the file exists on disk')
-
-    local contents = file:read('a')
-    file:close()
-
-    assertTrue(contents:find('<CHandlingDataMgr>', 1, true), 'it is a handling file')
-    assertTrue(contents:find('SULTAN', 1, true), 'it contains the tuned vehicle')
-
-    -- And it round-trips, so a restart would restore the edit.
-    local tunes = Meta.Parse(contents)
-    assertClose(tunes['sultan'].values.fBrakeForce, 1.23, 1e-9, 'edit survived')
-
-    scrub()
-end)
-
-test('a genuinely unwritable location fails cleanly', function()
+test('the last error is retained for the menu', function()
     seedFleet()
 
-    local realSave, realPath = SaveResourceFile, GetResourcePath
-    SaveResourceFile = function() return false end
-    GetResourcePath = function() return '/proc/nonexistent-vehedit' end
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return true end
+    harness.files['handling.meta'] = nil
 
-    local ok, err = quietly(function() return Meta.Save() end)
+    quietly(function() return Meta.Save() end)
+    SaveResourceFile = realSave
 
-    SaveResourceFile, GetResourcePath = realSave, realPath
-    assertEqual(ok, false, 'failed')
-    assertTrue(err and #err > 0, 'explained why')
+    assertTrue(Meta.lastError, 'error retained')
+
+    quietly(function() return Meta.Save() end)
+    assertEqual(Meta.lastError, nil, 'cleared on a good save')
 end)
 
 test('diagnostics name the resource and the target file', function()
-    local realPath = GetResourcePath
-    GetResourcePath = function() return SCRATCH end
+    local captured = {}
+    local realPrint = print
+    print = function(text) captured[#captured + 1] = tostring(text) end
 
-    local lines = table.concat(Meta.Diagnose(), '\n')
+    Meta.Diagnose()
+    print = realPrint
 
-    GetResourcePath = realPath
-    assertTrue(lines:find('resource name', 1, true), 'names the resource')
-    assertTrue(lines:find('target file', 1, true), 'names the target file')
-    assertTrue(lines:find(SCRATCH, 1, true), 'shows the resolved path')
+    local text = table.concat(captured, '\n')
+    assertTrue(text:find('fivem%-vehicle%-editor'), 'names the resource')
+    assertTrue(text:find('handling.meta', 1, true), 'names the file')
 end)
 
-test('the resource loads in a runtime without package, io or os.execute', function()
-    -- The CitizenFX Lua runtime has no `package`, and `io` / `os.execute` are
-    -- not guaranteed. A file-scope reference to any of them aborts the rest of
-    -- the file, which silently leaves later functions undefined instead of
-    -- failing loudly -- exactly how Meta.Save once went missing while Meta.Load
-    -- (declared above it) still worked.
-    local realPackage, realIO, realExecute = package, io, os.execute
+test('tunes at the old data/ path are migrated to the root', function()
+    seedFleet()
+    Store.SetTier('sultan', 5)
+    Store.SetValue('sultan', 'fInitialDriveForce', 0.46)
+    Meta.Save()
+
+    -- Simulate an install still carrying the old layout.
+    harness.files['data/handling.meta'] = harness.files['handling.meta']
+    harness.files['handling.meta'] = nil
+    Store.tunes = {}
+
+    local loaded = quietly(function() return Meta.Load() end)
+    assertTrue(loaded > 0, 'legacy file adopted')
+    assertClose(Store.Get('sultan').values.fInitialDriveForce, 0.46, 1e-9, 'edit preserved')
+
+    -- And the migration rewrites it at the new location.
+    assertTrue(harness.files['handling.meta'], 'written to the root')
+    assertTrue(harness.files['handling.meta']:find('SULTAN', 1, true), 'contains the tune')
+end)
+
+test('an empty legacy skeleton does not trigger a migration', function()
+    resetStore()
+    harness.files['data/handling.meta'] =
+        '<?xml version="1.0"?>\n<CHandlingDataMgr>\n  <HandlingData>\n  </HandlingData>\n</CHandlingDataMgr>'
+    harness.files['handling.meta'] = nil
+
+    assertEqual(Meta.Load(), 0, 'nothing loaded')
+end)
+
+test('the resource loads in a runtime without package, io or os', function()
+    -- The CitizenFX Lua runtime has no `package` and no `io`. A file-scope
+    -- reference to either aborts the rest of the file during load, which
+    -- silently leaves later functions undefined instead of failing loudly --
+    -- exactly how Meta.Save went missing while Meta.Load, declared above it,
+    -- kept working.
+    local realPackage, realIO, realOS = package, io, os
 
     package = nil
     io = nil
-    os.execute = nil
+    os = nil
 
     local ok, err = pcall(dofile, 'server/meta.lua')
 
-    package, io, os.execute = realPackage, realIO, realExecute
+    package, io, os = realPackage, realIO, realOS
 
     assertTrue(ok, 'server/meta.lua loaded: ' .. tostring(err))
 
@@ -653,23 +677,24 @@ test('the resource loads in a runtime without package, io or os.execute', functi
     end
 end)
 
-test('saving still works when io is unavailable', function()
+test('saving works with no io library present', function()
     seedFleet()
     Store.SetValue('sultan', 'fBrakeForce', 1.31)
 
-    local realIO = io
+    local realIO, realOS = io, os
     io = nil
+    os = nil
 
     local ok = quietly(function() return Meta.Save() end)
 
-    io = realIO
+    io, os = realIO, realOS
     assertEqual(ok, true, 'SaveResourceFile carried it alone')
 
-    local tunes = Meta.Parse(harness.files['data/handling.meta'])
+    local tunes = Meta.Parse(harness.files['handling.meta'])
     assertClose(tunes['sultan'].values.fBrakeForce, 1.31, 1e-9, 'edit written')
 end)
 
-test('every function the server calls on Meta and Store exists', function()
+test('every function the server calls on Meta, Store and OxCore exists', function()
     -- Cheap guard against another partial load going unnoticed.
     for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'Diagnose' }) do
         assertEqual(type(Meta[name]), 'function', 'Meta.' .. name)

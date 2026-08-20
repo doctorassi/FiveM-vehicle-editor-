@@ -18,7 +18,7 @@ runs.
 - **Automatic generation** — roll the whole fleet at once, each car inside its own tier band.
 - **Per-vehicle rolls** on request, at any tier you pick.
 - **Performance mods** — engine, brakes, transmission, suspension, armour and turbo, with tier defaults and per-vehicle overrides.
-- **Always saved** — every edit autosaves to `data/handling.meta` and is reloaded on startup.
+- **Always saved** — every edit autosaves to `handling.meta` and is reloaded on startup.
 - **Live application** — saved values take effect immediately for every player, no restart needed.
 - **Server-side authority** — ace-gated, with every value re-validated and clamped on the server.
 - **ox_core support** (optional) — tunes apply the instant an ox_core vehicle spawns, player-owned mods are respected, and tier-aware wrappers around `Ox.CreateVehicle` / `Ox.SpawnVehicle` are exported.
@@ -86,8 +86,8 @@ dialog also offers to restore the vanilla value.
 | Command | Effect |
 |---|---|
 | `vehedit_autoall` | Roll every configured vehicle at its own tier |
-| `vehedit_save` | Write `data/handling.meta` now |
-| `vehedit_reload` | Re-read `data/handling.meta` from disk |
+| `vehedit_save` | Write `handling.meta` now |
+| `vehedit_reload` | Re-read `handling.meta` from disk |
 | `vehedit_diag` | Report why saving is failing, then attempt a write |
 
 ## Configuration
@@ -200,13 +200,18 @@ translation lives in `Util.ModsToProperties`:
 
 ## How saving works
 
-`data/handling.meta` is both the file the game loads and the editor's save file.
-It is registered in `fxmanifest.lua` as:
+`handling.meta` at the resource root is both the file the game loads and the
+editor's save file. It is registered in `fxmanifest.lua` as:
 
 ```lua
-files { 'data/handling.meta' }
-data_file 'HANDLING_FILE' 'data/handling.meta'
+files { 'handling.meta' }
+data_file 'HANDLING_FILE' 'handling.meta'
 ```
+
+It sits at the root rather than in a subfolder on purpose: `SaveResourceFile`
+cannot create directories, so a missing folder is the usual reason a write
+silently fails. A tune file left at the old `data/handling.meta` path by an
+earlier version is read once on startup and rewritten at the new location.
 
 Each entry is preceded by an XML comment carrying the editor's own state:
 
@@ -249,7 +254,7 @@ report. The usual causes are:
 
 ### Notes and limits
 
-- `data/handling.meta` is **generated**. Entries carrying a `vehicle-editor`
+- `handling.meta` is **generated**. Entries carrying a `vehicle-editor`
   comment are rewritten on every save. Entries without one are preserved
   verbatim, so a hand-written entry is safe, but the tidier place for your own
   handling is your own resource.
@@ -281,16 +286,19 @@ native boundary:
 
 ## Runtime notes
 
-The CitizenFX Lua runtime is not full standard Lua. There is no `package`
-library, and `io` and `os.execute` are not guaranteed. That matters more than it
-sounds: a reference to a missing library at **file scope** raises at load time
-and aborts the rest of that file, so functions declared below the failure are
-silently never defined while the ones above it keep working — the failure only
-shows up later as `attempt to call a nil value`.
+The CitizenFX Lua runtime is not full standard Lua: there is no `package`, no
+`io`, and no filesystem library. `SaveResourceFile` and `LoadResourceFile` are
+the only way to touch a file, which is the pattern this resource uses and
+nothing else.
 
-Server code here therefore probes every optional library lazily, inside a
-function, behind a `type()` check, and `tests/run.lua` loads the resource with
-`package`, `io` and `os.execute` removed to prove it still comes up whole.
+That matters more than it sounds. A reference to a missing library at **file
+scope** raises at load time and aborts the rest of that file, so functions
+declared below the failure are silently never defined while the ones above keep
+working — and the failure surfaces much later, somewhere else, as `attempt to
+call a nil value`.
+
+No shipped file references `io`, `os` or `package` at all, and `tests/run.lua`
+loads the resource with all three removed to prove it comes up whole.
 
 ## Tests
 
@@ -304,14 +312,15 @@ lua5.4 tests/run.lua
 Covers tier rolls staying inside their bands, values being clamped server-side,
 non-finite input being rejected, originals never being overwritten once
 captured, a save-then-restart restoring identical state, foreign entries
-surviving a rewrite, the write fallback creating a missing `data` directory,
-the resource loading in a runtime without `package`/`io`/`os.execute`, and the
-ox_core property mapping and ownership rules.
+surviving a rewrite, a save being verified by read-back rather than by the
+return value, migration from the old `data/` path, the resource loading in a
+runtime without `package`/`io`/`os`, and the ox_core property mapping and
+ownership rules.
 
 ## Project layout
 
 ```
-fxmanifest.lua        manifest, registers data/handling.meta as HANDLING_FILE
+fxmanifest.lua        manifest, registers handling.meta as HANDLING_FILE
 config.lua            vehicles, tiers, ace, mod types
 shared/fields.lua     handling field catalogue and unit metadata
 shared/util.lua       conversion, clamping, tier rolls, formatting

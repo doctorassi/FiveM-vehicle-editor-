@@ -29,11 +29,15 @@ server_scripts {
 
 -- The generated tune file. `data_file` makes the game load it at resource start,
 -- which is what keeps edits applied from startup with no scripting involved.
+--
+-- It sits at the resource root rather than in a subfolder because
+-- SaveResourceFile cannot create directories -- a missing folder is the usual
+-- reason a write silently fails.
 files {
-    'data/handling.meta',
+    'handling.meta',
 }
 
-data_file 'HANDLING_FILE' 'data/handling.meta'
+data_file 'HANDLING_FILE' 'handling.meta'
 
 dependency 'ox_lib'
 

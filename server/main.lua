@@ -231,13 +231,10 @@ end, false)
 AddEventHandler('onResourceStart', function(resource)
     if resource ~= GetCurrentResourceName() then return end
 
-    -- Guarded: this runtime does not ship the whole standard library, and a
+    -- Lua 5.4 seeds itself when called with no arguments. Deliberately not
+    -- os.time(): this runtime does not ship the full standard library, and a
     -- throw here would abort the rest of onResourceStart.
-    if type(os) == 'table' and type(os.time) == 'function' then
-        math.randomseed(os.time())
-    else
-        pcall(math.randomseed)
-    end
+    math.randomseed()
 
     local loaded = Meta.Load()
 
