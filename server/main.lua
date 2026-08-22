@@ -208,7 +208,7 @@ end)
 ---A client reporting the vanilla values it read off a freshly spawned vehicle.
 ---Only ever accepted once per model (Store.SetOriginals refuses to overwrite),
 ---so a client cannot rewrite the originals of an already-tuned vehicle.
-lib.callback.register('vehicleeditor:submitOriginals', function(source, snapshots)
+lib.callback.register('vehicleeditor:submitOriginals', function(source, snapshots, failures, skippedFields)
     if not Store.CanEdit(source) then
         return false, 'You do not have permission to edit vehicles.'
     end
@@ -217,12 +217,40 @@ lib.callback.register('vehicleeditor:submitOriginals', function(source, snapshot
         return false, 'invalid snapshot payload'
     end
 
-    local stored = 0
+    local stored, rejected = 0, {}
+
     for model, originals in pairs(snapshots) do
-        if Config.VehicleByModel[type(model) == 'string' and model:lower() or ''] then
-            if Store.SetOriginals(model, originals) then
+        local key = type(model) == 'string' and model:lower() or ''
+
+        if Config.VehicleByModel[key] then
+            local ok, err = Store.SetOriginals(model, originals)
+            if ok then
                 stored = stored + 1
+            elseif err then
+                rejected[#rejected + 1] = ('%s (%s)'):format(model, err)
             end
+        end
+    end
+
+    -- Capture runs on a client, so without this the server console sees nothing
+    -- and a total failure looks identical to everything being fine.
+    if stored > 0 then
+        print(('[vehicle-editor] captured vanilla values for %d vehicle(s)'):format(stored))
+    end
+
+    if type(skippedFields) == 'table' and #skippedFields > 0 then
+        print(('[vehicle-editor] fields the handling natives would not read (left at game defaults): %s')
+            :format(table.concat(skippedFields, ', ')))
+    end
+
+    for i = 1, #rejected do
+        print('[vehicle-editor] snapshot rejected: ' .. rejected[i])
+    end
+
+    if type(failures) == 'table' and #failures > 0 then
+        print(('[vehicle-editor] %d vehicle(s) could not be captured:'):format(#failures))
+        for i = 1, #failures do
+            print('  - ' .. tostring(failures[i]))
         end
     end
 
@@ -262,12 +290,13 @@ RegisterCommand('vehedit_save', function(source)
         return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
     end
     local stateOk = State.Save()
-    local metaOk = Meta.Save()
+    local metaOk, _, entries = Meta.Save()
 
     print(('[vehicle-editor] %s: %s | handling.meta: %s'):format(
         State.PATH,
         stateOk and 'saved' or 'FAILED',
-        metaOk and 'saved' or 'not written (see diagnostics above)'))
+        metaOk and ('saved with %d entr%s'):format(entries or 0, (entries or 0) == 1 and 'y' or 'ies')
+            or 'not written (see diagnostics above)'))
 end, false)
 
 RegisterCommand('vehedit_diag', function(source)
@@ -316,6 +345,42 @@ RegisterCommand('vehedit_testwrite', function(source)
         print('  -> file writing is broken for this resource.')
         print(('     read back: %s'):format(readBack and ('%d bytes'):format(#readBack) or 'nothing'))
     end
+end, false)
+
+---Ask a client to re-run the vanilla capture. Capture has to happen on a
+---client because reading handling requires a spawned vehicle, so this targets
+---an admin who is in game.
+RegisterCommand('vehedit_snapshot', function(source)
+    if not Store.CanEdit(source) then
+        return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
+    end
+
+    local missing = Store.MissingOriginals()
+    if #missing == 0 then
+        return print('[vehicle-editor] every configured vehicle already has a vanilla snapshot.')
+    end
+
+    local target = source
+
+    if target == 0 then
+        -- From the console: pick any admin who is in game.
+        for _, playerId in ipairs(GetPlayers()) do
+            local id = tonumber(playerId)
+            if id and Store.CanEdit(id) then
+                target = id
+                break
+            end
+        end
+    end
+
+    if target == 0 then
+        print('[vehicle-editor] no admin is in game to capture from.')
+        print(('[vehicle-editor] join and run /%s, or use this command in game.'):format(Config.Command))
+        return
+    end
+
+    print(('[vehicle-editor] asking player %d to capture %d vehicle(s)...'):format(target, #missing))
+    TriggerClientEvent('vehicleeditor:captureOriginals', target, missing)
 end, false)
 
 RegisterCommand('vehedit_reload', function(source)

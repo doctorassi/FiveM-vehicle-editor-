@@ -103,6 +103,66 @@ local function installNatives()
     }
 end
 
+---Install stubs for the handling natives so client/originals.lua can run
+---headlessly. `harness.unreadable[field] = true` makes a field read back nil,
+---mimicking a build whose natives will not expose it.
+function harness.installHandlingNatives()
+    harness.unreadable = {}
+    harness.vehicles = {}
+    harness.nextEntity = 1000
+
+    local function value(field)
+        if harness.unreadable[field] then return nil end
+        return 1.5
+    end
+
+    GetVehicleHandlingFloat = function(_, _, field) return value(field) end
+    GetVehicleHandlingInt = function(_, _, field)
+        local v = value(field)
+        return v and 5 or nil
+    end
+    GetVehicleHandlingVector = function(_, _, field)
+        if harness.unreadable[field] then return nil end
+        return { x = 0.1, y = 0.2, z = 0.3 }
+    end
+
+    joaat = function(text) return #text end
+    IsModelInCdimage = function() return true end
+    IsModelAVehicle = function() return true end
+    RequestModel = function() end
+    HasModelLoaded = function() return true end
+    SetModelAsNoLongerNeeded = function() end
+    GetGameTimer = function() return 0 end
+    Wait = function() end
+    DoesEntityExist = function(e) return e ~= nil and e ~= 0 end
+    SetEntityCollision = function() end
+    SetEntityVisible = function() end
+    FreezeEntityPosition = function() end
+    DeleteEntity = function(e) harness.vehicles[e] = nil end
+    RegisterNetEvent = function() end
+    vec3 = function(x, y, z) return { x = x, y = y, z = z } end
+
+    ---Models named here fail to spawn.
+    harness.unspawnable = {}
+    CreateVehicle = function(hash)
+        if harness.unspawnable[hash] then return 0 end
+        harness.nextEntity = harness.nextEntity + 1
+        harness.vehicles[harness.nextEntity] = true
+        return harness.nextEntity
+    end
+
+    ---Captures what the client submitted.
+    harness.submitted = nil
+    lib.callback = lib.callback or {}
+    lib.callback.await = function(_, _, snapshots, failures, skipped)
+        harness.submitted = { snapshots = snapshots, failures = failures, skipped = skipped }
+        local count = 0
+        for _ in pairs(snapshots or {}) do count = count + 1 end
+        return true, nil, count
+    end
+    lib.notify = function() end
+end
+
 ---Fire every handler registered for an event.
 function harness.fire(event, ...)
     local handlers = harness.handlers[event]

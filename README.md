@@ -55,6 +55,12 @@ briefly under the map to read its vanilla handling, then deletes it. This
 happens once per vehicle and is what makes the "original value" column real
 rather than guessed.
 
+**This capture is not optional.** Until a vehicle has its vanilla snapshot it
+cannot be compared, cannot be written to `handling.meta`, and is not applied in
+game — a save will report `handling.meta written with 0 entries`. If capture
+fails, the server console names each vehicle and why. `vehedit_snapshot` re-runs
+it, and opening a single vehicle's menu captures just that one.
+
 ## Usage
 
 ### `/vehedit`
@@ -89,6 +95,7 @@ dialog also offers to restore the vanilla value.
 | `vehedit_save` | Write `tunes.json` and `handling.meta` now |
 | `vehedit_reload` | Re-read the saved tunes from disk |
 | `vehedit_diag` | Print save diagnostics, then attempt a write |
+| `vehedit_snapshot` | Re-run the vanilla capture for any vehicle still missing one |
 | `vehedit_testwrite` | Write and read back a test file, to check file writing on its own |
 
 ## Configuration
@@ -292,7 +299,12 @@ FXServer, or the resource sitting on a read-only mount or inside an archive.
   handling is your own resource.
 - A complete `<Item>` is always written. A partial entry would make the game
   default every field it omits, which is why the vanilla snapshot is required
-  before a vehicle can be saved.
+  before a vehicle can be saved. A snapshot short of any physics field is
+  refused and named rather than stored.
+- Four non-physics fields (`fSeatOffsetDistX/Y/Z`, `nMonetaryValue`) are marked
+  optional. If the handling natives on a build will not read them back they are
+  left out of the entry and the game uses its own defaults, which is harmless
+  for a seat offset or a price tag.
 - `SubHandlingData` is written as `NULL`. Vehicles that rely on subhandling data
   (hydraulics, boats, planes, some bikes) will lose those extras — this resource
   is aimed at cars.

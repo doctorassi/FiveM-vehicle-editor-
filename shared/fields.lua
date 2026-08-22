@@ -26,6 +26,12 @@ local RAD_TO_DEG = 180.0 / math.pi
 ---Every entry here is snapshotted from vanilla and written back out, because a
 ---partial <Item type="CHandlingData"> makes the game default every field the
 ---entry omits.
+---
+---`optional = true` marks the handful of fields that are not physics: if the
+---handling natives on a given build will not read them back, they are left out
+---of the entry and the game uses its own default, which is harmless for a seat
+---offset or a price tag. Every other field is required -- a vehicle that cannot
+---produce one is reported and skipped rather than written incomplete.
 Fields.All = {
     { name = 'fMass',                            type = 'float' },
     { name = 'fInitialDragCoeff',                type = 'float',  metaScale = 10000.0 },
@@ -68,10 +74,10 @@ Fields.All = {
     { name = 'fEngineDamageMult',                type = 'float' },
     { name = 'fPetrolTankVolume',                type = 'float' },
     { name = 'fOilVolume',                       type = 'float' },
-    { name = 'fSeatOffsetDistX',                 type = 'float' },
-    { name = 'fSeatOffsetDistY',                 type = 'float' },
-    { name = 'fSeatOffsetDistZ',                 type = 'float' },
-    { name = 'nMonetaryValue',                   type = 'int' },
+    { name = 'fSeatOffsetDistX',                 type = 'float',  optional = true },
+    { name = 'fSeatOffsetDistY',                 type = 'float',  optional = true },
+    { name = 'fSeatOffsetDistZ',                 type = 'float',  optional = true },
+    { name = 'nMonetaryValue',                   type = 'int',    optional = true },
     { name = 'strModelFlags',                    type = 'flags' },
     { name = 'strHandlingFlags',                 type = 'flags' },
     { name = 'strDamageFlags',                   type = 'flags' },
@@ -83,6 +89,15 @@ for i = 1, #Fields.All do
     local field = Fields.All[i]
     field.index = i
     Fields.ByName[field.name] = field
+end
+
+---Field names that must be present in a snapshot for it to be usable.
+Fields.Required = {}
+for i = 1, #Fields.All do
+    local field = Fields.All[i]
+    if not field.optional then
+        Fields.Required[#Fields.Required + 1] = field.name
+    end
 end
 
 ---Menu categories, in display order.

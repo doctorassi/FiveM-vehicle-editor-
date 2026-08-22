@@ -817,6 +817,156 @@ test('state ignores models no longer in the config', function()
 end)
 
 --------------------------------------------------------------------------------
+print('\nvanilla capture')
+--------------------------------------------------------------------------------
+-- This is what left handling.meta empty: no vehicle ever got a snapshot, so
+-- Meta.BuildEntry bailed on every one of them and the file was written as a
+-- bare shell that reported success.
+
+harness.installHandlingNatives()
+dofile('client/originals.lua')
+
+test('an unreadable optional field does not sink the whole snapshot', function()
+    harness.unreadable = { fSeatOffsetDistX = true, nMonetaryValue = true }
+
+    local snapshot, err, skipped = Originals.Snapshot('sultan')
+
+    assertTrue(snapshot, 'captured: ' .. tostring(err))
+    assertEqual(snapshot.fSeatOffsetDistX, nil, 'optional field omitted')
+    assertTrue(snapshot.fMass, 'physics fields still present')
+    assertTrue(#skipped >= 2, 'reported what it skipped')
+
+    harness.unreadable = {}
+end)
+
+test('an unreadable physics field rejects that vehicle by name', function()
+    harness.unreadable = { fInitialDriveForce = true }
+
+    local snapshot, err = Originals.Snapshot('sultan')
+
+    assertEqual(snapshot, nil, 'refused')
+    assertTrue(err and err:find('fInitialDriveForce', 1, true), 'names the field: ' .. tostring(err))
+
+    harness.unreadable = {}
+end)
+
+test('reading never throws, whatever the natives return', function()
+    -- The original bug: `value.x + 0.0` on a nil vector, and arithmetic on a nil
+    -- float, both raised and killed the capture of every vehicle.
+    local realVector, realFloat = GetVehicleHandlingVector, GetVehicleHandlingFloat
+    GetVehicleHandlingVector = function() return nil end
+    GetVehicleHandlingFloat = function() return nil end
+
+    local ok = pcall(Originals.ReadVehicle, 1)
+
+    GetVehicleHandlingVector, GetVehicleHandlingFloat = realVector, realFloat
+    assertTrue(ok, 'ReadVehicle survived natives returning nil')
+end)
+
+test('one bad model does not stop the rest being captured', function()
+    harness.submitted = nil
+    harness.unspawnable = { [#'futo'] = true }   -- joaat stub is string length
+
+    local captured, failures = Originals.CaptureAndSubmit({ 'sultan', 'futo', 'adder' })
+
+    harness.unspawnable = {}
+
+    assertTrue(captured >= 2, 'the good models were captured, got ' .. tostring(captured))
+    assertEqual(#failures, 1, 'exactly one failure recorded')
+    assertTrue(failures[1]:find('futo', 1, true), 'names the bad model')
+end)
+
+test('busy is cleared after a failure so a retry still runs', function()
+    -- Leaving this latched was what made the editor permanently and silently
+    -- dead: every later attempt returned "nothing to do" instead of retrying.
+    local realSnapshot = Originals.Snapshot
+    Originals.Snapshot = function() error('boom') end
+
+    Originals.CaptureAndSubmit({ 'sultan' })
+    Originals.Snapshot = realSnapshot
+
+    assertEqual(Originals.busy, false, 'busy released after an error')
+
+    local captured = Originals.CaptureAndSubmit({ 'sultan' })
+    assertTrue(captured > 0, 'a retry actually captures')
+end)
+
+test('a total failure still reaches the server so it lands in the console', function()
+    harness.submitted = nil
+    local realSnapshot = Originals.Snapshot
+    Originals.Snapshot = function(model) return nil, model .. ' exploded' end
+
+    local captured, failures = Originals.CaptureAndSubmit({ 'sultan', 'adder' })
+    Originals.Snapshot = realSnapshot
+
+    assertEqual(captured, 0, 'nothing captured')
+    assertEqual(#failures, 2, 'both failures recorded')
+    assertTrue(harness.submitted, 'the server was told anyway')
+    assertEqual(#harness.submitted.failures, 2, 'failures were sent')
+end)
+
+--------------------------------------------------------------------------------
+print('\nempty handling.meta')
+--------------------------------------------------------------------------------
+
+test('a save with no snapshots reports zero entries instead of looking fine', function()
+    resetStore()
+    for i = 1, #Config.Vehicles do Store.Ensure(Config.Vehicles[i].model) end
+    Store.RandomizeAll()
+
+    local captured = {}
+    local realPrint = print
+    print = function(text) captured[#captured + 1] = tostring(text) end
+
+    local ok, _, entries = Meta.Save()
+    print = realPrint
+
+    assertEqual(ok, true, 'the write itself succeeded')
+    assertEqual(entries, 0, 'but nothing went in')
+
+    local text = table.concat(captured, '\n')
+    assertTrue(text:find('0 entries', 1, true), 'said so out loud:\n' .. text)
+    assertTrue(text:find('vehedit_snapshot', 1, true), 'pointed at the fix')
+end)
+
+test('a save with snapshots reports how many went in', function()
+    seedFleet()
+
+    local ok, _, entries = Meta.Save()
+    assertEqual(ok, true, 'saved')
+    assertEqual(entries, #Config.Vehicles, 'every vehicle written')
+
+    local written = harness.files['handling.meta']
+    local count = select(2, written:gsub('<Item type="CHandlingData">', ''))
+    assertEqual(count, #Config.Vehicles, 'one entry per vehicle in the file')
+end)
+
+test('an incomplete snapshot is rejected with a reason', function()
+    resetStore()
+    Store.Ensure('sultan')
+
+    local partial = harness.fakeOriginals(1)
+    partial.fInitialDriveForce = nil
+
+    local ok, err = Store.SetOriginals('sultan', partial)
+    assertEqual(ok, false, 'refused')
+    assertTrue(err and err:find('fInitialDriveForce', 1, true), 'names the field: ' .. tostring(err))
+    assertEqual(Store.Get('sultan').originals, nil, 'nothing stored')
+end)
+
+test('optional fields absent from a snapshot are fine', function()
+    resetStore()
+    Store.Ensure('sultan')
+
+    local partial = harness.fakeOriginals(1)
+    partial.fSeatOffsetDistX = nil
+    partial.nMonetaryValue = nil
+
+    assertEqual(Store.SetOriginals('sultan', partial), true, 'accepted')
+    assertTrue(Meta.BuildEntry(Store.Get('sultan')), 'entry still builds')
+end)
+
+--------------------------------------------------------------------------------
 print('\nox_core integration')
 --------------------------------------------------------------------------------
 

@@ -102,7 +102,8 @@ local function ensureOriginals()
     if #failures > 0 then
         lib.notify({
             title = 'Vehicle Editor',
-            description = ('Could not capture: %s'):format(table.concat(failures, ', ')),
+            description = ('%d vehicle(s) failed — see the server console for the reason.')
+                :format(#failures),
             type = 'error',
             duration = 8000,
         })
@@ -114,9 +115,47 @@ local function ensureOriginals()
             description = ('Captured vanilla values for %d vehicle(s).'):format(captured),
             type = 'success',
         })
+    elseif #failures == 0 then
+        -- Neither captured nor failed means the capture never ran. Say so
+        -- instead of opening a menu that silently cannot save anything.
+        lib.notify({
+            title = 'Vehicle Editor',
+            description = 'Vanilla capture did not run. Try again in a moment.',
+            type = 'error',
+        })
     end
 
     return refresh()
+end
+
+---Capture one vehicle on demand, so a partial failure can be fixed car by car
+---instead of needing the whole fleet to succeed at once.
+---@param model string
+---@return boolean ok
+local function ensureOneOriginal(model)
+    local tune = tuneFor(model)
+    if tune and tune.originals then return true end
+
+    lib.notify({
+        title = 'Vehicle Editor',
+        description = ('Capturing vanilla values for %s…'):format(model:upper()),
+        type = 'inform',
+    })
+
+    local ok, err = Originals.CaptureOne(model)
+
+    if not ok then
+        lib.notify({
+            title = 'Vehicle Editor',
+            description = ('Could not capture %s: %s'):format(model:upper(), tostring(err)),
+            type = 'error',
+            duration = 8000,
+        })
+        return false
+    end
+
+    refresh()
+    return true
 end
 
 --------------------------------------------------------------------------------
@@ -373,6 +412,13 @@ function showVehicle(model)
     if not tune then
         lib.notify({ title = 'Vehicle Editor', description = 'That vehicle is not configured.', type = 'error' })
         return
+    end
+
+    -- Without a vanilla snapshot this vehicle cannot be compared, written to
+    -- handling.meta, or applied in game, so try to capture it now.
+    if not tune.originals then
+        ensureOneOriginal(model)
+        tune = tuneFor(model) or tune
     end
 
     local configured = Config.VehicleByModel[model] or {}

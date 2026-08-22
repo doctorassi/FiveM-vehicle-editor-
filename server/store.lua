@@ -84,8 +84,9 @@ end
 ---@return boolean stored
 function Store.SetOriginals(model, originals)
     local entry = Store.Ensure(model)
-    if not entry or type(originals) ~= 'table' then return false end
-    if entry.originals then return false end
+    if not entry then return false, 'not a configured vehicle' end
+    if type(originals) ~= 'table' then return false, 'snapshot is not a table' end
+    if entry.originals then return false, nil end
 
     local clean = {}
     for i = 1, #Fields.All do
@@ -103,9 +104,25 @@ function Store.SetOriginals(model, originals)
         end
     end
 
+    -- A snapshot missing a physics field would be written to handling.meta
+    -- incomplete, and the game would silently default whatever is absent. Refuse
+    -- it and say which fields are short, rather than storing something that
+    -- produces a subtly wrong car.
+    local missing = {}
+    for i = 1, #Fields.Required do
+        if clean[Fields.Required[i]] == nil then
+            missing[#missing + 1] = Fields.Required[i]
+        end
+    end
+
+    if #missing > 0 then
+        return false, ('missing %d required field(s): %s')
+            :format(#missing, table.concat(missing, ', ', 1, math.min(#missing, 5)))
+    end
+
     entry.originals = clean
-    debugPrint(('cached vanilla snapshot for %s (%d fields)'):format(model, #Fields.All))
-    return true
+    debugPrint(('cached vanilla snapshot for %s'):format(model))
+    return true, nil
 end
 
 ---Models that are configured but have no vanilla snapshot yet.
