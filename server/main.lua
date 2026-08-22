@@ -275,14 +275,47 @@ RegisterCommand('vehedit_diag', function(source)
         return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
     end
 
-    print('[vehicle-editor] --- save diagnostics ---')
-    for _, line in ipairs(Meta.Diagnose()) do
-        print('[vehicle-editor]   ' .. line)
-    end
+    Meta.Diagnose()
 
     print('[vehicle-editor] attempting a write now...')
-    local ok, err = Meta.Save()
-    print(('[vehicle-editor] result: %s'):format(ok and 'SUCCESS' or ('FAILED — ' .. tostring(err))))
+
+    local stateOk, stateErr = State.Save()
+    local metaOk, metaErr = Meta.Save()
+
+    print(('[vehicle-editor] %s : %s'):format(State.PATH,
+        stateOk and 'SUCCESS' or ('FAILED — ' .. tostring(stateErr))))
+    print(('[vehicle-editor] handling.meta : %s'):format(
+        metaOk and 'SUCCESS' or ('FAILED — ' .. tostring(metaErr))))
+end, false)
+
+---Mirrors a minimal standalone write test, so this resource can be compared
+---directly against one on the same server. Everything goes through the same
+---hash-invoked natives the editor itself uses.
+RegisterCommand('vehedit_testwrite', function(source)
+    if not Store.CanEdit(source) then
+        return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
+    end
+
+    local marker = ('vehicle-editor write test %d'):format(math.random(1, 1e9))
+    local wrote = Meta.writeFile('write_test.txt', marker)
+    local readBack = Meta.readFile('write_test.txt')
+
+    print('[vehicle-editor] write test')
+    print(('  resource        : %s'):format(GetCurrentResourceName()))
+    print(('  SAVE_RESOURCE_FILE returned : %s'):format(tostring(wrote)))
+    print(('  read back matches           : %s'):format(tostring(readBack == marker)))
+
+    if type(GetResourcePath) == 'function' then
+        local ok, path = pcall(GetResourcePath, GetCurrentResourceName())
+        print(('  resource path   : %s'):format(ok and tostring(path) or 'unavailable'))
+    end
+
+    if wrote and readBack == marker then
+        print('  -> file writing works. Saving will work.')
+    else
+        print('  -> file writing is broken for this resource.')
+        print(('     read back: %s'):format(readBack and ('%d bytes'):format(#readBack) or 'nothing'))
+    end
 end, false)
 
 RegisterCommand('vehedit_reload', function(source)

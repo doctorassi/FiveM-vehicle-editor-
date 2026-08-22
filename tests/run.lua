@@ -532,87 +532,116 @@ local function quietly(fn)
     return result, err
 end
 
-test('a save is verified by reading the file back, not by the return value', function()
-    seedFleet()
-    Store.SetValue('sultan', 'fBrakeForce', 1.27)
+---Run `fn` with every write refused.
+local function withWritesFailing(fn)
+    harness.writesFail = true
+    local ok, result, err = pcall(fn)
+    harness.writesFail = false
+    if not ok then error(result, 2) end
+    return result, err
+end
 
-    -- A build that reports failure but writes the file correctly still counts
-    -- as a success, because the read-back is the source of truth.
-    local realSave = SaveResourceFile
-    SaveResourceFile = function(resource, path, data)
-        harness.files[path] = data
-        return false
+test('a shadowed SaveResourceFile global cannot break saving', function()
+    -- This is the bug that cost several rounds. A plain assignment anywhere in
+    -- the Lua state replaces the global for everyone, and the call then never
+    -- reaches the native. Invoking by hash is immune, so a full save and
+    -- restart must work with the globals not just shadowed but actively hostile.
+    seedFleet()
+    Store.SetTier('adder', 5)
+    Store.SetValue('adder', 'fInitialDriveForce', 0.46)
+
+    local realSave, realLoad = SaveResourceFile, LoadResourceFile
+    SaveResourceFile = function() return false end
+    LoadResourceFile = function() return nil end
+
+    local ok = State.Save()
+
+    Store.tunes = {}
+    local loaded = State.Load()
+
+    SaveResourceFile, LoadResourceFile = realSave, realLoad
+
+    assertEqual(ok, true, 'saved through the native')
+    assertTrue(loaded > 0, 'restored through the native')
+    assertClose(Store.Get('adder').values.fInitialDriveForce, 0.46, 1e-9, 'edit survived')
+end)
+
+test('nothing shipped calls the SaveResourceFile or LoadResourceFile globals', function()
+    -- The harness globals throw, so any shipped call site shows up here.
+    seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.24)
+
+    State.Save()
+    Meta.Save()
+    Store.tunes = {}
+    State.Load()
+    Meta.Load()
+    Meta.Diagnose()
+
+    assertClose(Store.Get('sultan').values.fBrakeForce, 1.24, 1e-9, 'round trip clean')
+end)
+
+test('a refused write is reported rather than silently succeeding', function()
+    seedFleet()
+
+    local ok, err = withWritesFailing(function()
+        return quietly(function() return State.Save() end)
+    end)
+
+    assertEqual(ok, false, 'reported as failed')
+    assertTrue(err and err:find('refused'), 'names the refusal: ' .. tostring(err))
+    assertTrue(State.lastError, 'error retained for the menu')
+end)
+
+test('the last error clears on the next good save', function()
+    seedFleet()
+
+    withWritesFailing(function() return quietly(function() return State.Save() end) end)
+    assertTrue(State.lastError, 'error set')
+
+    State.Save()
+    assertEqual(State.lastError, nil, 'cleared')
+end)
+
+test('a repeated handling.meta failure is only reported once', function()
+    seedFleet()
+    quietly(function() return Meta.Save() end)
+
+    local count = 0
+    local realPrint = print
+    print = function(text)
+        if tostring(text):find('could not write handling.meta', 1, true) then count = count + 1 end
     end
 
-    local ok = quietly(function() return Meta.Save() end)
+    harness.writesFail = true
+    Meta.Save()
+    Meta.Save()
+    Meta.Save()
+    harness.writesFail = false
 
-    SaveResourceFile = realSave
-    assertEqual(ok, true, 'read-back wins over the return value')
+    print = realPrint
+    assertEqual(count, 1, 'warned once, not on every autosave')
 end)
 
-test('a save that silently writes nothing is caught', function()
+test('a handling.meta that refuses writes does not lose state', function()
     seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.33)
 
-    -- The opposite case: reports success, writes nothing.
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() return true end
-    harness.files['handling.meta'] = nil
+    -- State saves fine; only handling.meta is refused.
+    assertEqual(State.Save(), true, 'state saved')
 
-    local ok, err = quietly(function() return Meta.Save() end)
+    harness.writesFail = true
+    local metaOk = quietly(function() return Meta.Save() end)
+    harness.writesFail = false
 
-    SaveResourceFile = realSave
-    assertEqual(ok, false, 'not fooled by the return value')
-    assertTrue(err and err:find('produced no file'), 'names the failure: ' .. tostring(err))
+    assertEqual(metaOk, false, 'meta failure detected')
+
+    Store.tunes = {}
+    State.Load()
+    assertClose(Store.Get('sultan').values.fBrakeForce, 1.33, 1e-9, 'edit survived')
 end)
 
-test('a truncated write is caught', function()
-    seedFleet()
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function(_, path, data)
-        harness.files[path] = data:sub(1, 10)
-        return true
-    end
-
-    local ok, err = quietly(function() return Meta.Save() end)
-
-    SaveResourceFile = realSave
-    assertEqual(ok, false, 'short file rejected')
-    assertTrue(err and err:find('bytes on disk'), 'reports the size mismatch')
-end)
-
-test('a hard failure reports rather than throwing', function()
-    seedFleet()
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() error('permission denied') end
-
-    local ok = pcall(function() return quietly(function() return Meta.Save() end) end)
-
-    SaveResourceFile = realSave
-    -- Save is allowed to propagate a native that throws, but it must not be the
-    -- silent nil-function failure that started all this.
-    assertEqual(type(Meta.Save), 'function', 'Meta.Save survived')
-    assertTrue(ok == true or ok == false, 'call completed')
-end)
-
-test('the last error is retained for the menu', function()
-    seedFleet()
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() return true end
-    harness.files['handling.meta'] = nil
-
-    quietly(function() return Meta.Save() end)
-    SaveResourceFile = realSave
-
-    assertTrue(Meta.lastError, 'error retained')
-
-    quietly(function() return Meta.Save() end)
-    assertEqual(Meta.lastError, nil, 'cleared on a good save')
-end)
-
-test('diagnostics name the resource and the target file', function()
+test('diagnostics name the resource and both files', function()
     local captured = {}
     local realPrint = print
     print = function(text) captured[#captured + 1] = tostring(text) end
@@ -622,36 +651,9 @@ test('diagnostics name the resource and the target file', function()
 
     local text = table.concat(captured, '\n')
     assertTrue(text:find('fivem%-vehicle%-editor'), 'names the resource')
-    assertTrue(text:find('handling.meta', 1, true), 'names the file')
-end)
-
-test('tunes at the old data/ path are migrated to the root', function()
-    seedFleet()
-    Store.SetTier('sultan', 5)
-    Store.SetValue('sultan', 'fInitialDriveForce', 0.46)
-    Meta.Save()
-
-    -- Simulate an install still carrying the old layout.
-    harness.files['data/handling.meta'] = harness.files['handling.meta']
-    harness.files['handling.meta'] = nil
-    Store.tunes = {}
-
-    local loaded = quietly(function() return Meta.Load() end)
-    assertTrue(loaded > 0, 'legacy file adopted')
-    assertClose(Store.Get('sultan').values.fInitialDriveForce, 0.46, 1e-9, 'edit preserved')
-
-    -- And the migration rewrites it at the new location.
-    assertTrue(harness.files['handling.meta'], 'written to the root')
-    assertTrue(harness.files['handling.meta']:find('SULTAN', 1, true), 'contains the tune')
-end)
-
-test('an empty legacy skeleton does not trigger a migration', function()
-    resetStore()
-    harness.files['data/handling.meta'] =
-        '<?xml version="1.0"?>\n<CHandlingDataMgr>\n  <HandlingData>\n  </HandlingData>\n</CHandlingDataMgr>'
-    harness.files['handling.meta'] = nil
-
-    assertEqual(Meta.Load(), 0, 'nothing loaded')
+    assertTrue(text:find('tunes.json', 1, true), 'names the state file')
+    assertTrue(text:find('handling.meta', 1, true), 'names the meta file')
+    assertTrue(text:find('vehedit_testwrite', 1, true), 'points at the write test')
 end)
 
 test('the resource loads in a runtime without package, io or os', function()
@@ -672,30 +674,14 @@ test('the resource loads in a runtime without package, io or os', function()
 
     assertTrue(ok, 'server/meta.lua loaded: ' .. tostring(err))
 
-    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'BuildEntry', 'Diagnose', 'HandlingName' }) do
+    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'BuildEntry', 'Diagnose',
+                            'HandlingName', 'writeFile', 'readFile' }) do
         assertEqual(type(Meta[name]), 'function', 'Meta.' .. name .. ' is defined')
     end
 
     for _, name in ipairs({ 'Save', 'Load', 'Build' }) do
         assertEqual(type(State[name]), 'function', 'State.' .. name .. ' is defined')
     end
-end)
-
-test('saving works with no io library present', function()
-    seedFleet()
-    Store.SetValue('sultan', 'fBrakeForce', 1.31)
-
-    local realIO, realOS = io, os
-    io = nil
-    os = nil
-
-    local ok = quietly(function() return Meta.Save() end)
-
-    io, os = realIO, realOS
-    assertEqual(ok, true, 'SaveResourceFile carried it alone')
-
-    local tunes = Meta.Parse(harness.files['handling.meta'])
-    assertClose(tunes['sultan'].values.fBrakeForce, 1.31, 1e-9, 'edit written')
 end)
 
 test('State is defined by the same file as Meta', function()
@@ -716,7 +702,7 @@ end)
 
 test('every function the server calls on Meta, Store and OxCore exists', function()
     -- Cheap guard against another partial load going unnoticed.
-    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'Diagnose', 'ProbeWrite' }) do
+    for _, name in ipairs({ 'Save', 'Load', 'Build', 'Parse', 'Diagnose', 'writeFile', 'readFile' }) do
         assertEqual(type(Meta[name]), 'function', 'Meta.' .. name)
     end
 
@@ -763,88 +749,6 @@ test('state round-trips through tunes.json', function()
     assertTrue(Store.ResolveValues('adder'), 'resolvable after load')
 end)
 
-test('a handling.meta that refuses writes does not lose state', function()
-    -- Exactly the reported failure: handling.meta is declared as a data_file,
-    -- the resource system holds it, and the write never lands -- LoadResourceFile
-    -- keeps returning the original skeleton.
-    seedFleet()
-    Store.SetValue('sultan', 'fBrakeForce', 1.33)
-
-    local skeleton = '<?xml version="1.0"?><CHandlingDataMgr><HandlingData></HandlingData></CHandlingDataMgr>'
-    harness.files['handling.meta'] = skeleton
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function(resource, path, data)
-        if path == 'handling.meta' then return true end -- reports success, writes nothing
-        harness.files[path] = data
-        return true
-    end
-
-    local stateOk = State.Save()
-    local metaOk = quietly(function() return Meta.Save() end)
-
-    SaveResourceFile = realSave
-
-    assertEqual(stateOk, true, 'state still saved')
-    assertEqual(metaOk, false, 'meta failure detected')
-    assertEqual(harness.files['handling.meta'], skeleton, 'meta really was not written')
-
-    -- The edit survives a restart regardless.
-    Store.tunes = {}
-    State.Load()
-    assertClose(Store.Get('sultan').values.fBrakeForce, 1.33, 1e-9, 'edit survived')
-end)
-
-test('a repeated handling.meta failure is only reported once', function()
-    seedFleet()
-
-    -- A good save first, so the warn-once latch starts clear regardless of
-    -- what an earlier test left behind.
-    quietly(function() return Meta.Save() end)
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function(_, path, data)
-        if path == 'handling.meta' then return true end
-        harness.files[path] = data
-        return true
-    end
-    harness.files['handling.meta'] = 'stale'
-
-    local count = 0
-    local realPrint = print
-    print = function(text)
-        if tostring(text):find('could not write handling.meta', 1, true) then count = count + 1 end
-    end
-
-    Meta.Save()
-    Meta.Save()
-    Meta.Save()
-
-    print = realPrint
-    SaveResourceFile = realSave
-
-    assertEqual(count, 1, 'warned once, not on every autosave')
-end)
-
-test('the write probe separates a locked file from an unwritable folder', function()
-    -- Folder writable: the scratch file round-trips.
-    assertEqual(Meta.ProbeWrite(), true, 'probe succeeds when writes work')
-
-    -- Folder not writable at all.
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() return false end
-    local ok, err = Meta.ProbeWrite()
-    SaveResourceFile = realSave
-
-    assertEqual(ok, false, 'probe fails when nothing can be written')
-    assertTrue(err, 'reports why')
-end)
-
-test('the probe does not leave a populated scratch file behind', function()
-    Meta.ProbeWrite()
-    assertEqual(harness.files['write_probe.tmp'], '', 'scratch file emptied')
-end)
-
 test('state migrates from handling.meta when there is no state file', function()
     seedFleet()
     Store.SetTier('sultan', 4)
@@ -861,8 +765,32 @@ test('state migrates from handling.meta when there is no state file', function()
 
     assertEqual(State.Save(), true, 'state written on migration')
     assertTrue(harness.files['tunes.json'], 'state file now exists')
+end)
 
-    quietly(function() return Meta.Save() end)
+test('tunes at the old data/ path are migrated to the root', function()
+    seedFleet()
+    Store.SetTier('sultan', 5)
+    Store.SetValue('sultan', 'fInitialDriveForce', 0.46)
+    Meta.Save()
+
+    harness.files['data/handling.meta'] = harness.files['handling.meta']
+    harness.files['handling.meta'] = nil
+    harness.files['tunes.json'] = nil
+    Store.tunes = {}
+
+    local loaded = quietly(function() return Meta.Load() end)
+    assertTrue(loaded > 0, 'legacy file adopted')
+    assertClose(Store.Get('sultan').values.fInitialDriveForce, 0.46, 1e-9, 'edit preserved')
+    assertTrue(harness.files['handling.meta'], 'rewritten at the root')
+end)
+
+test('an empty legacy skeleton does not trigger a migration', function()
+    resetStore()
+    harness.files['data/handling.meta'] =
+        '<?xml version="1.0"?>\n<CHandlingDataMgr>\n  <HandlingData>\n  </HandlingData>\n</CHandlingDataMgr>'
+    harness.files['handling.meta'] = nil
+
+    assertEqual(Meta.Load(), 0, 'nothing loaded')
 end)
 
 test('an unreadable state file is ignored rather than fatal', function()
@@ -886,87 +814,6 @@ test('state ignores models no longer in the config', function()
     assertEqual(Store.Get('adder'), nil, 'dropped')
 
     Config.VehicleByModel['adder'] = saved
-end)
-
-test('a read-only resource folder falls back to the KVP store', function()
-    -- The reported host: reads work, every write is refused. The resource must
-    -- still persist tunes across a restart.
-    seedFleet()
-    Store.SetTier('adder', 5)
-    Store.SetValue('adder', 'fInitialDriveForce', 0.48)
-
-    harness.kvp = {}
-    harness.installKvp(true)
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() return false end
-
-    local ok = quietly(function() return State.Save() end)
-
-    assertEqual(ok, true, 'saved despite a read-only folder')
-    assertEqual(State.storage, 'kvp', 'used the KVP store')
-    assertTrue(next(harness.kvp), 'something was stored')
-
-    -- Restart with the folder still unwritable and the file still absent.
-    Store.tunes = {}
-    harness.files['tunes.json'] = nil
-
-    local loaded = quietly(function() return State.Load() end)
-    SaveResourceFile = realSave
-
-    assertTrue(loaded > 0, 'restored from KVP')
-    assertEqual(Store.Get('adder').tier, 5, 'tier survived')
-    assertClose(Store.Get('adder').values.fInitialDriveForce, 0.48, 1e-9, 'edit survived')
-end)
-
-test('the file wins over KVP once the folder is writable again', function()
-    seedFleet()
-    harness.installKvp(true)
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() return false end
-    quietly(function() return State.Save() end)
-    assertEqual(State.storage, 'kvp', 'on KVP')
-
-    SaveResourceFile = realSave
-    quietly(function() return State.Save() end)
-    assertEqual(State.storage, 'file', 'back on the file')
-end)
-
-test('a build without KVP natives still reports the failure honestly', function()
-    seedFleet()
-    harness.installKvp(false)
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() return false end
-
-    local ok, err = quietly(function() return State.Save() end)
-
-    SaveResourceFile = realSave
-    harness.installKvp(true)
-
-    assertEqual(ok, false, 'reported as failed')
-    assertTrue(err and err:find('KVP fallback'), 'mentions the fallback: ' .. tostring(err))
-    assertEqual(State.storage, nil, 'no store claimed')
-end)
-
-test('a KVP write that does not round-trip is not trusted', function()
-    seedFleet()
-
-    -- A store that silently truncates, e.g. a value size limit.
-    SetResourceKvp = function(key, value) harness.kvp[key] = value:sub(1, 10) end
-    GetResourceKvpString = function(key) return harness.kvp[key] end
-
-    local realSave = SaveResourceFile
-    SaveResourceFile = function() return false end
-
-    local ok, err = quietly(function() return State.Save() end)
-
-    SaveResourceFile = realSave
-    harness.installKvp(true)
-
-    assertEqual(ok, false, 'truncation detected')
-    assertTrue(err and err:find('KVP kept'), 'reports what was kept: ' .. tostring(err))
 end)
 
 --------------------------------------------------------------------------------
@@ -1189,6 +1036,60 @@ test('autosave stays quiet when startup was refused', function()
     -- the resource came up.
     local command = harness.commands['vehedit_save']
     assertTrue(command, 'command registered')
+end)
+
+test('every console command runs without throwing', function()
+    -- Commands are easy to break silently when the functions under them change
+    -- shape -- vehedit_diag once iterated a Diagnose() that had stopped
+    -- returning a table.
+    resetStore()
+    bootMain()
+
+    for _, name in ipairs({ 'vehedit_autoall', 'vehedit_save', 'vehedit_diag',
+                            'vehedit_testwrite', 'vehedit_reload' }) do
+        local command = harness.commands[name]
+        assertTrue(command, name .. ' is registered')
+
+        local realPrint = print
+        print = function() end
+        local ok, err = pcall(command, 0)
+        print = realPrint
+
+        assertTrue(ok, name .. ' threw: ' .. tostring(err))
+    end
+end)
+
+test('vehedit_testwrite reports a working write', function()
+    resetStore()
+    bootMain()
+
+    local captured = {}
+    local realPrint = print
+    print = function(text) captured[#captured + 1] = tostring(text) end
+
+    harness.commands['vehedit_testwrite'](0)
+    print = realPrint
+
+    local text = table.concat(captured, '\n')
+    assertTrue(text:find('write test', 1, true), 'announced itself')
+    assertTrue(text:find('read back matches           : true', 1, true), 'read-back matched:\n' .. text)
+end)
+
+test('vehedit_testwrite reports a broken write', function()
+    resetStore()
+    bootMain()
+
+    local captured = {}
+    local realPrint = print
+    print = function(text) captured[#captured + 1] = tostring(text) end
+
+    harness.writesFail = true
+    harness.commands['vehedit_testwrite'](0)
+    harness.writesFail = false
+    print = realPrint
+
+    local text = table.concat(captured, '\n')
+    assertTrue(text:find('file writing is broken', 1, true), 'reported the failure:\n' .. text)
 end)
 
 --------------------------------------------------------------------------------

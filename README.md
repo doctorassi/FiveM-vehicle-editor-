@@ -88,7 +88,8 @@ dialog also offers to restore the vanilla value.
 | `vehedit_autoall` | Roll every configured vehicle at its own tier |
 | `vehedit_save` | Write `tunes.json` and `handling.meta` now |
 | `vehedit_reload` | Re-read the saved tunes from disk |
-| `vehedit_diag` | Report why saving is failing, then attempt a write |
+| `vehedit_diag` | Print save diagnostics, then attempt a write |
+| `vehedit_testwrite` | Write and read back a test file, to check file writing on its own |
 
 ## Configuration
 
@@ -227,28 +228,25 @@ the manifest does not declare. If that succeeds, the folder is writable and only
 `handling.meta` is locked; if it fails, the server process cannot write into the
 resource folder at all.
 
-### When the resource folder is read-only
+### File writing
 
-If even `tunes.json` cannot be written, the editor falls back to the **server
-KVP store**, which lives in the server's own data directory rather than in the
-resource folder. Tunes still survive restarts. The fallback is probed at runtime
-and verified by reading the value back, so a build without those natives — or a
-store that truncates the value — is reported rather than silently trusted, and
-plain-file saving resumes automatically once the folder is writable again.
+All file IO goes through `Citizen.InvokeNative` with the native hashes rather
+than the `SaveResourceFile` / `LoadResourceFile` globals:
 
-A folder that reads fine but refuses every write is a permission or filesystem
-problem outside this resource. In rough order of likelihood:
+| Native | Hash | apiset |
+|---|---|---|
+| `SAVE_RESOURCE_FILE` | `0xA09E7E7B` | server |
+| `LOAD_RESOURCE_FILE` | `0x76A9EE1F` | shared |
 
-1. The account running FXServer lacks **Write** on the folder. The read-only
-   checkbox in the folder properties is not this setting — check the Security
-   tab and grant Modify to that account.
-2. **Antivirus or Windows Controlled Folder Access** is blocking FXServer.
-   Writes are denied silently while reads keep working. Allow `FXServer.exe`.
-3. **The path itself** — unusual characters or mismatched brackets in a parent
-   folder name are worth ruling out against a plain path like
-   `C:\FXServer\resources`.
-4. The drive is mounted read-only, or the folder sits on a synced or versioned
-   share that denies writes.
+Those globals can be **shadowed**. A plain `SaveResourceFile = ...` anywhere in
+the same Lua state replaces them for every script in the resource, and the call
+then never reaches the native — it just reports failure, which looks exactly
+like a permissions problem and is why this took several rounds to pin down.
+Invoking by hash cannot be intercepted that way.
+
+If saving ever misbehaves, `vehedit_testwrite` does one direct write and reads
+it back, printing what the native returned. It is the smallest possible check
+that file writing works for this resource.
 
 Tunes from an earlier version are migrated automatically: if there is no
 `tunes.json`, `handling.meta` (or the older `data/handling.meta`) is read once
@@ -275,23 +273,16 @@ the same values are already in the file for the next restart.
 
 ### If saving fails
 
-The editor writes at boot, so a permissions problem shows up immediately rather
-than after you have done work that cannot be kept. On failure it prints a
-diagnostic naming the resource path, the target file, and whether the folder is
-readable and writable, and every admin in game gets a notification — edits stay
-in memory but would be lost on restart.
+A failed save prints a short diagnostic naming the resource, both target files
+and the resource path, and every admin in game gets a notification — edits stay
+live but would be lost on restart.
 
-Saving is attempted twice: first through `SaveResourceFile`, then, if that fails
-or writes nothing, directly through the filesystem, which also creates the `data`
-folder if it is missing. Run `vehedit_diag` in the server console for the full
-report. The usual causes are:
-
-- **No `data` folder** — the direct write creates it; if that fails too, make one
-  by hand inside the resource.
-- **The resource folder is not writable by FXServer** — on Linux,
-  `chown -R fxserver:fxserver <resource folder>`.
-- **The resource is on a read-only mount, inside a zip, or escrow-protected** —
-  writing is not possible; move it to a normal writable folder.
+Run `vehedit_testwrite` first. It does one direct write and reads it back, which
+separates "this resource cannot write files" from anything to do with tunes. If
+that succeeds but saving does not, the problem is in the editor; if it fails,
+the resource genuinely cannot write, and the usual causes are the account
+running FXServer lacking write permission on the folder, antivirus blocking
+FXServer, or the resource sitting on a read-only mount or inside an archive.
 
 ### Notes and limits
 
@@ -367,11 +358,11 @@ lua5.4 tests/run.lua
 Covers tier rolls staying inside their bands, values being clamped server-side,
 non-finite input being rejected, originals never being overwritten once
 captured, a save-then-restart restoring identical state, foreign entries
-surviving a rewrite, a save being verified by read-back rather than by the
-return value, tunes surviving a restart even when `handling.meta` refuses every
-write, migration from the older layouts, the resource loading in a runtime
-without `package`/`io`/`os`, and the ox_core property mapping and ownership
-rules.
+surviving a rewrite, saving still working with the `SaveResourceFile` and
+`LoadResourceFile` globals shadowed, tunes surviving a restart even when
+`handling.meta` refuses every write, migration from the older layouts, the
+resource loading in a runtime without `package`/`io`/`os`, and the ox_core
+property mapping and ownership rules.
 
 ## Project layout
 

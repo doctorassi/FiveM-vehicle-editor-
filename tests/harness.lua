@@ -16,11 +16,43 @@ local function installNatives()
 
     GetCurrentResourceName = function() return 'fivem-vehicle-editor' end
 
-    LoadResourceFile = function(_, path) return harness.files[path] end
+    -- The resource invokes these by hash so a shadowed global cannot intercept
+    -- them, so the harness stubs Citizen.InvokeNative rather than the globals.
+    -- The globals below are deliberately left BROKEN: nothing shipped may call
+    -- them, and a test that starts passing through them will fail loudly.
+    local SAVE_RESOURCE_FILE = 0xA09E7E7B
+    local LOAD_RESOURCE_FILE = 0x76A9EE1F
 
-    SaveResourceFile = function(_, path, data)
-        harness.files[path] = data
-        return true
+    ---Set by a test to make writes fail, mimicking a refused write.
+    harness.writesFail = false
+
+    Citizen = {
+        ResultAsInteger = function() return '__resultAsInteger' end,
+        ResultAsString = function() return '__resultAsString' end,
+        InvokeNative = function(hash, ...)
+            local args = { ... }
+
+            if hash == SAVE_RESOURCE_FILE then
+                local path, data = args[2], args[3]
+                if harness.writesFail then return 0 end
+                harness.files[path] = data
+                return 1
+            end
+
+            if hash == LOAD_RESOURCE_FILE then
+                return harness.files[args[2]]
+            end
+
+            error(('unexpected native 0x%X'):format(hash))
+        end,
+    }
+
+    LoadResourceFile = function()
+        error('shipped code must not use the LoadResourceFile global', 2)
+    end
+
+    SaveResourceFile = function()
+        error('shipped code must not use the SaveResourceFile global', 2)
     end
 
     ---Ace state the tests can flip.
@@ -56,20 +88,6 @@ local function installNatives()
     GetResourceState = function() return 'missing' end
     NetworkGetNetworkIdFromEntity = function(entity) return entity end
     DoesEntityExist = function(entity) return entity ~= nil and entity ~= 0 end
-
-    -- Server KVP store. Presence is toggled per test: some builds do not have
-    -- these natives at all, which the fallback has to tolerate.
-    harness.kvp = {}
-    harness.installKvp = function(enabled)
-        if enabled == false then
-            SetResourceKvp, GetResourceKvpString, FlushResourceKvp = nil, nil, nil
-            return
-        end
-        SetResourceKvp = function(key, value) harness.kvp[key] = value end
-        GetResourceKvpString = function(key) return harness.kvp[key] end
-        FlushResourceKvp = function() end
-    end
-    harness.installKvp(true)
 
     harness.exported = {}
     exports = setmetatable({}, {
