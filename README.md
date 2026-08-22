@@ -227,6 +227,29 @@ the manifest does not declare. If that succeeds, the folder is writable and only
 `handling.meta` is locked; if it fails, the server process cannot write into the
 resource folder at all.
 
+### When the resource folder is read-only
+
+If even `tunes.json` cannot be written, the editor falls back to the **server
+KVP store**, which lives in the server's own data directory rather than in the
+resource folder. Tunes still survive restarts. The fallback is probed at runtime
+and verified by reading the value back, so a build without those natives — or a
+store that truncates the value — is reported rather than silently trusted, and
+plain-file saving resumes automatically once the folder is writable again.
+
+A folder that reads fine but refuses every write is a permission or filesystem
+problem outside this resource. In rough order of likelihood:
+
+1. The account running FXServer lacks **Write** on the folder. The read-only
+   checkbox in the folder properties is not this setting — check the Security
+   tab and grant Modify to that account.
+2. **Antivirus or Windows Controlled Folder Access** is blocking FXServer.
+   Writes are denied silently while reads keep working. Allow `FXServer.exe`.
+3. **The path itself** — unusual characters or mismatched brackets in a parent
+   folder name are worth ruling out against a plain path like
+   `C:\FXServer\resources`.
+4. The drive is mounted read-only, or the folder sits on a synced or versioned
+   share that denies writes.
+
 Tunes from an earlier version are migrated automatically: if there is no
 `tunes.json`, `handling.meta` (or the older `data/handling.meta`) is read once
 and written out to the new state file.

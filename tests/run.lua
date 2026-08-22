@@ -888,6 +888,87 @@ test('state ignores models no longer in the config', function()
     Config.VehicleByModel['adder'] = saved
 end)
 
+test('a read-only resource folder falls back to the KVP store', function()
+    -- The reported host: reads work, every write is refused. The resource must
+    -- still persist tunes across a restart.
+    seedFleet()
+    Store.SetTier('adder', 5)
+    Store.SetValue('adder', 'fInitialDriveForce', 0.48)
+
+    harness.kvp = {}
+    harness.installKvp(true)
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return false end
+
+    local ok = quietly(function() return State.Save() end)
+
+    assertEqual(ok, true, 'saved despite a read-only folder')
+    assertEqual(State.storage, 'kvp', 'used the KVP store')
+    assertTrue(next(harness.kvp), 'something was stored')
+
+    -- Restart with the folder still unwritable and the file still absent.
+    Store.tunes = {}
+    harness.files['tunes.json'] = nil
+
+    local loaded = quietly(function() return State.Load() end)
+    SaveResourceFile = realSave
+
+    assertTrue(loaded > 0, 'restored from KVP')
+    assertEqual(Store.Get('adder').tier, 5, 'tier survived')
+    assertClose(Store.Get('adder').values.fInitialDriveForce, 0.48, 1e-9, 'edit survived')
+end)
+
+test('the file wins over KVP once the folder is writable again', function()
+    seedFleet()
+    harness.installKvp(true)
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return false end
+    quietly(function() return State.Save() end)
+    assertEqual(State.storage, 'kvp', 'on KVP')
+
+    SaveResourceFile = realSave
+    quietly(function() return State.Save() end)
+    assertEqual(State.storage, 'file', 'back on the file')
+end)
+
+test('a build without KVP natives still reports the failure honestly', function()
+    seedFleet()
+    harness.installKvp(false)
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return false end
+
+    local ok, err = quietly(function() return State.Save() end)
+
+    SaveResourceFile = realSave
+    harness.installKvp(true)
+
+    assertEqual(ok, false, 'reported as failed')
+    assertTrue(err and err:find('KVP fallback'), 'mentions the fallback: ' .. tostring(err))
+    assertEqual(State.storage, nil, 'no store claimed')
+end)
+
+test('a KVP write that does not round-trip is not trusted', function()
+    seedFleet()
+
+    -- A store that silently truncates, e.g. a value size limit.
+    SetResourceKvp = function(key, value) harness.kvp[key] = value:sub(1, 10) end
+    GetResourceKvpString = function(key) return harness.kvp[key] end
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return false end
+
+    local ok, err = quietly(function() return State.Save() end)
+
+    SaveResourceFile = realSave
+    harness.installKvp(true)
+
+    assertEqual(ok, false, 'truncation detected')
+    assertTrue(err and err:find('KVP kept'), 'reports what was kept: ' .. tostring(err))
+end)
+
 --------------------------------------------------------------------------------
 print('\nox_core integration')
 --------------------------------------------------------------------------------

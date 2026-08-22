@@ -397,6 +397,10 @@ function Meta.Diagnose()
         lines[#lines + 1] = ('  resource path    : %s'):format(ok and tostring(path) or 'unavailable')
     end
 
+    lines[#lines + 1] = ('  state store      : %s'):format(
+        State and (State.storage == 'kvp' and 'server KVP (resource folder is read-only)'
+            or State.storage == 'file' and 'tunes.json'
+            or 'NOTHING — edits are not being saved') or 'unknown')
     lines[#lines + 1] = ''
 
     if probeOk then
@@ -407,10 +411,30 @@ function Meta.Diagnose()
         lines[#lines + 1] = '  through the handling natives, so the editor works normally. Only the'
         lines[#lines + 1] = '  native load-at-startup shortcut is unavailable.'
     else
-        lines[#lines + 1] = '  The server process cannot write into the resource folder at all.'
-        lines[#lines + 1] = '  Check ownership and permissions on it, and make sure the resource is'
-        lines[#lines + 1] = '  not running from a read-only mount or an archive. Until this is fixed'
-        lines[#lines + 1] = '  edits will apply live but will NOT survive a restart.'
+        lines[#lines + 1] = '  The server process can READ this folder but cannot WRITE to it. That is'
+        lines[#lines + 1] = '  a permission or filesystem problem outside this resource. In order of'
+        lines[#lines + 1] = '  how often it turns out to be the cause:'
+        lines[#lines + 1] = ''
+        lines[#lines + 1] = '   1. The account running FXServer lacks Write on this folder. The'
+        lines[#lines + 1] = '      read-only checkbox in the folder properties is NOT this setting --'
+        lines[#lines + 1] = '      check the Security tab, and grant Modify to that account.'
+        lines[#lines + 1] = '   2. Antivirus or Windows Controlled Folder Access is blocking'
+        lines[#lines + 1] = '      FXServer. Writes get denied silently while reads keep working.'
+        lines[#lines + 1] = '      Add FXServer.exe to the allowed list.'
+        lines[#lines + 1] = '   3. The path itself. Unusual characters and mismatched brackets in a'
+        lines[#lines + 1] = '      parent folder name are worth ruling out by testing a plain path'
+        lines[#lines + 1] = '      such as C:\\FXServer\\resources.'
+        lines[#lines + 1] = '   4. The drive is mounted read-only, or the folder is on a synced or'
+        lines[#lines + 1] = '      versioned share that denies writes.'
+
+        if State and State.storage == 'kvp' then
+            lines[#lines + 1] = ''
+            lines[#lines + 1] = '  Meanwhile tunes ARE being saved to the server KVP store, so they'
+            lines[#lines + 1] = '  survive restarts. Fixing the above restores plain-file saving.'
+        else
+            lines[#lines + 1] = ''
+            lines[#lines + 1] = '  Until this is fixed edits apply live but will NOT survive a restart.'
+        end
     end
 
     print(table.concat(lines, '\n'))
@@ -495,6 +519,58 @@ local FORMAT_VERSION = 1
 ---Last failure reason, surfaced to the menu.
 State.lastError = nil
 
+---Which store the last successful save used: 'file', 'kvp', or nil.
+State.storage = nil
+
+-- Fallback store. The KVP natives keep their data in the server's own data
+-- directory rather than in the resource folder, so they still work when the
+-- resource folder is read-only -- a NAS or network share mounted without write
+-- access, for instance. Availability differs between server builds, so this is
+-- probed at runtime and verified by reading the value back; if it is not there,
+-- nothing changes.
+local KVP_KEY = 'vehicle_editor_tunes'
+
+---@return boolean
+local function kvpAvailable()
+    return type(SetResourceKvp) == 'function' and type(GetResourceKvpString) == 'function'
+end
+
+---@param encoded string
+---@return boolean ok, string? err
+local function saveToKvp(encoded)
+    if not kvpAvailable() then
+        return false, 'the KVP natives are not available on this server build'
+    end
+
+    local stored = pcall(SetResourceKvp, KVP_KEY, encoded)
+    if not stored then return false, 'SetResourceKvp failed' end
+
+    if type(FlushResourceKvp) == 'function' then pcall(FlushResourceKvp) end
+
+    local readBack
+    if not pcall(function() readBack = GetResourceKvpString(KVP_KEY) end) then
+        return false, 'GetResourceKvpString failed'
+    end
+
+    if readBack ~= encoded then
+        return false, ('KVP kept %s of %d bytes'):format(
+            readBack and (#readBack .. ' bytes') or 'nothing', #encoded)
+    end
+
+    return true, nil
+end
+
+---@return string?
+local function loadFromKvp()
+    if not kvpAvailable() then return nil end
+
+    local value
+    if not pcall(function() value = GetResourceKvpString(KVP_KEY) end) then return nil end
+    if type(value) ~= 'string' or value == '' then return nil end
+
+    return value
+end
+
 ---Serialise the store into the on-disk shape.
 ---@return table
 function State.Build()
@@ -525,20 +601,43 @@ function State.Save()
     local readBack = LoadResourceFile(RESOURCE, STATE_PATH)
 
     if readBack and #readBack == #encoded then
+        if State.storage == 'kvp' then
+            print('[vehicle-editor] ' .. STATE_PATH .. ' is writable again; using it instead of KVP.')
+        end
         State.lastError = nil
+        State.storage = 'file'
         Store.debugPrint(('wrote %s (%d bytes)'):format(STATE_PATH, #encoded))
         return true, nil
     end
 
-    local err
+    local fileErr
     if not readBack then
-        err = ('SaveResourceFile("%s", "%s") produced no file (returned %s)')
+        fileErr = ('SaveResourceFile("%s", "%s") produced no file (returned %s)')
             :format(RESOURCE, STATE_PATH, tostring(reported))
     else
-        err = ('%s is %d bytes on disk but %d were written'):format(STATE_PATH, #readBack, #encoded)
+        fileErr = ('%s is %d bytes on disk but %d were written'):format(STATE_PATH, #readBack, #encoded)
     end
 
+    -- The resource folder will not take the file. Fall back to the KVP store,
+    -- which lives in the server's data directory instead.
+    local kvpOk, kvpErr = saveToKvp(encoded)
+
+    if kvpOk then
+        if State.storage ~= 'kvp' then
+            print(('[vehicle-editor] cannot write %s (%s)'):format(STATE_PATH, fileErr))
+            print('[vehicle-editor] falling back to the server KVP store — tunes WILL survive restarts.')
+            print('[vehicle-editor] fix the resource folder permissions to go back to a plain file.')
+        end
+        State.lastError = nil
+        State.storage = 'kvp'
+        Store.debugPrint(('wrote %d bytes to the KVP store'):format(#encoded))
+        return true, nil
+    end
+
+    local err = ('%s | KVP fallback: %s'):format(fileErr, kvpErr or 'unavailable')
+
     State.lastError = err
+    State.storage = nil
     print('[vehicle-editor] FAILED to save ' .. STATE_PATH .. ': ' .. err)
     Meta.Diagnose()
 
@@ -549,6 +648,13 @@ end
 ---@return number loaded
 function State.Load()
     local raw = LoadResourceFile(RESOURCE, STATE_PATH)
+    local source = 'file'
+
+    if not raw or raw == '' then
+        raw = loadFromKvp()
+        source = 'kvp'
+    end
+
     if not raw or raw == '' then return 0 end
 
     local ok, payload = pcall(json.decode, raw)
@@ -576,7 +682,15 @@ function State.Load()
     end
 
     Store.Bump()
-    Store.debugPrint(('loaded %d tune(s) from %s'):format(loaded, STATE_PATH))
+
+    if loaded > 0 then
+        State.storage = source
+        if source == 'kvp' then
+            print(('[vehicle-editor] restored %d tune(s) from the server KVP store'):format(loaded))
+        end
+    end
+
+    Store.debugPrint(('loaded %d tune(s) from %s'):format(loaded, source == 'kvp' and 'KVP' or STATE_PATH))
 
     return loaded
 end

@@ -57,6 +57,20 @@ local function installNatives()
     NetworkGetNetworkIdFromEntity = function(entity) return entity end
     DoesEntityExist = function(entity) return entity ~= nil and entity ~= 0 end
 
+    -- Server KVP store. Presence is toggled per test: some builds do not have
+    -- these natives at all, which the fallback has to tolerate.
+    harness.kvp = {}
+    harness.installKvp = function(enabled)
+        if enabled == false then
+            SetResourceKvp, GetResourceKvpString, FlushResourceKvp = nil, nil, nil
+            return
+        end
+        SetResourceKvp = function(key, value) harness.kvp[key] = value end
+        GetResourceKvpString = function(key) return harness.kvp[key] end
+        FlushResourceKvp = function() end
+    end
+    harness.installKvp(true)
+
     harness.exported = {}
     exports = setmetatable({}, {
         __call = function(_, name, fn) harness.exported[name] = fn end,
