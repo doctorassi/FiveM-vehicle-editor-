@@ -96,7 +96,7 @@ dialog also offers to restore the vanilla value.
 | `vehedit_reload` | Re-read the saved tunes from disk |
 | `vehedit_diag` | Print save diagnostics, then attempt a write |
 | `vehedit_snapshot` | Re-run the vanilla capture for any vehicle still missing one |
-| `vehedit_probe` | Write the same marker to declared and undeclared files and report which land |
+| `vehedit_probe` | Try each write mechanism in turn and report which one actually lands |
 | `vehedit_testwrite` | Write and read back a test file, to check file writing on its own |
 
 ## Configuration
@@ -260,46 +260,32 @@ The probe restores the real contents of any file it touches.
 
 ### File writing
 
-All file IO goes through `Citizen.InvokeNative` with the native hashes rather
-than the `SaveResourceFile` / `LoadResourceFile` globals:
+Two mechanisms exist for writing a file, and they are not equivalent on every
+server:
 
-| Native | Hash | apiset |
-|---|---|---|
-| `SAVE_RESOURCE_FILE` | `0xA09E7E7B` | server |
-| `LOAD_RESOURCE_FILE` | `0x76A9EE1F` | shared |
+- the `SaveResourceFile` / `LoadResourceFile` globals
+- `Citizen.InvokeNative` with the native hash (`SAVE_RESOURCE_FILE` `0xA09E7E7B`,
+  `LOAD_RESOURCE_FILE` `0x76A9EE1F`)
 
-Those globals can be **shadowed**. A plain `SaveResourceFile = ...` anywhere in
-the same Lua state replaces them for every script in the resource, and the call
-then never reaches the native — it just reports failure, which looks exactly
-like a permissions problem and is why this took several rounds to pin down.
-Invoking by hash cannot be intercepted that way.
+The globals are preferred, and are captured at load so a later reassignment
+cannot swap them out. The hash call is only a fallback for when the globals are
+absent.
 
-If saving ever misbehaves, `vehedit_testwrite` does one direct write and reads
-it back, printing what the native returned. It is the smallest possible check
-that file writing works for this resource.
+Two traps are worth knowing about, because both cost real debugging time here:
 
-Tunes from an earlier version are migrated automatically: if there is no
-`tunes.json`, `handling.meta` (or the older `data/handling.meta`) is read once
-and written out to the new state file.
+- `Citizen.InvokeNative` can return **`nil`** when the call does not reach the
+  native. `nil ~= 0` is **true** in Lua, so a naive `InvokeNative(...) ~= 0`
+  reports success for a write that never happened. Success is now checked
+  explicitly against `true` or `1`.
+- The return value cannot be trusted on its own even when it is a real boolean.
+  Every write is confirmed by reading the file back and comparing it to what was
+  written; that comparison, not the return value, decides whether a save
+  succeeded.
 
-Each entry is preceded by an XML comment carrying the editor's own state:
-
-```xml
-<!-- vehicle-editor {"tier":5,"originals":{…},"edits":{…},"mods":{…}} -->
-<Item type="CHandlingData">
-  <handlingName>ADDER</handlingName>
-  …
-</Item>
-```
-
-The game's parser ignores XML comments, so it sees an ordinary handling file
-while the editor can rebuild tiers, vanilla originals and the list of touched
-fields after a restart. There is no database and no second state file.
-
-Because the game only reads `handling.meta` when the resource starts, the editor
-also pushes every saved value through the handling natives on all clients. A
-save is live within one sweep (`Config.ApplyInterval`, 750 ms by default), and
-the same values are already in the file for the next restart.
+`vehedit_probe` writes a distinct payload through each mechanism in turn and
+reports the raw return value, **its Lua type**, the bytes on disk and whether
+the content matched. The type column is the important one: `nil` means the call
+never reached the native, `false` means the native refused.
 
 ### If saving fails
 

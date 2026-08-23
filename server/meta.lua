@@ -26,54 +26,104 @@ local META_PATH = 'handling.meta'
 -- tunes; never written to again.
 local LEGACY_PATH = 'data/handling.meta'
 
--- The natives are invoked BY HASH rather than through the SaveResourceFile /
--- LoadResourceFile globals.
+-- File IO.
 --
--- This is the whole reason saving failed for so long. Those globals can be
--- shadowed -- a plain `SaveResourceFile = ...` anywhere in this Lua state
--- replaces them for everyone -- and when that happens the call never reaches
--- the native and simply reports failure. Citizen.InvokeNative cannot be
--- intercepted that way, so file IO no longer depends on the global table being
--- intact.
+-- Two mechanisms exist and they are NOT equivalent on every server:
 --
--- Hashes from the CFX natives manifest:
+--   * the SaveResourceFile / LoadResourceFile globals
+--   * Citizen.InvokeNative with the native hash
+--
+-- The globals are preferred because they demonstrably reach the native on the
+-- reported host, where the hash call does not. They are captured at load so a
+-- later reassignment of the global cannot swap them out underneath us, which
+-- was the original reason for reaching for InvokeNative at all.
+--
+-- Hashes from the CFX natives manifest, used only as a fallback:
 --   SAVE_RESOURCE_FILE  0xA09E7E7B  server  BOOL(resource, file, data, length)
 --   LOAD_RESOURCE_FILE  0x76A9EE1F  shared  char*(resource, file)
---
--- The result-type hints are required: InvokeNative does not know the signature.
 
 local SAVE_RESOURCE_FILE = 0xA09E7E7B
 local LOAD_RESOURCE_FILE = 0x76A9EE1F
 
+local capturedSave = rawget(_G, 'SaveResourceFile')
+local capturedLoad = rawget(_G, 'LoadResourceFile')
+
+---Only an explicit true or 1 counts.
+---
+---This is the bug that made every save report success while writing nothing:
+---the old code did `InvokeNative(...) ~= 0`, and when InvokeNative produced nil
+---— the native not resolving on the server — `nil ~= 0` is TRUE in Lua, so the
+---helper returned success unconditionally.
+---@param result any
+---@return boolean
+local function nativeSucceeded(result)
+    return result == true or result == 1
+end
+
+---How the last write was performed, for the diagnostics.
+Meta.mechanism = nil
+
 ---Write a file inside this resource.
 ---@param fileName string
 ---@param data string
----@return boolean ok
+---@return boolean ok, any rawResult, string mechanism
 local function writeFile(fileName, data)
-    return Citizen.InvokeNative(SAVE_RESOURCE_FILE, RESOURCE, fileName, data, #data,
-        Citizen.ResultAsInteger()) ~= 0
+    if type(capturedSave) == 'function' then
+        local ok, result = pcall(capturedSave, RESOURCE, fileName, data, -1)
+
+        if ok and nativeSucceeded(result) then
+            Meta.mechanism = 'SaveResourceFile'
+            return true, result, 'SaveResourceFile'
+        end
+
+        -- Fall through to the hash call, but remember what the global said.
+        if ok then
+            local invoked, raw = pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
+                RESOURCE, fileName, data, #data, Citizen.ResultAsInteger())
+
+            if invoked and nativeSucceeded(raw) then
+                Meta.mechanism = 'InvokeNative'
+                return true, raw, 'InvokeNative'
+            end
+
+            Meta.mechanism = 'SaveResourceFile'
+            return false, result, 'SaveResourceFile'
+        end
+    end
+
+    local invoked, raw = pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
+        RESOURCE, fileName, data, #data, Citizen.ResultAsInteger())
+
+    Meta.mechanism = 'InvokeNative'
+    return invoked and nativeSucceeded(raw), raw, 'InvokeNative'
 end
 
 ---Read a file inside this resource.
 ---@param fileName string
 ---@return string?
 local function readFile(fileName)
-    return Citizen.InvokeNative(LOAD_RESOURCE_FILE, RESOURCE, fileName,
-        Citizen.ResultAsString())
+    if type(capturedLoad) == 'function' then
+        local ok, content = pcall(capturedLoad, RESOURCE, fileName)
+        if ok and type(content) == 'string' then return content end
+        if ok then return nil end
+    end
+
+    local ok, content = pcall(Citizen.InvokeNative, LOAD_RESOURCE_FILE, RESOURCE,
+        fileName, Citizen.ResultAsString())
+
+    return ok and type(content) == 'string' and content or nil
 end
 
 ---Write a file and prove it landed by reading it back.
 ---
----SAVE_RESOURCE_FILE cannot be trusted on its own: on at least one host it
----returns true for a file the manifest declares while the bytes on disk never
----change. Reporting that as a successful save is worse than failing, because it
----sends you looking everywhere except at the write. LOAD_RESOURCE_FILE does
----return real on-disk content here, so the comparison is meaningful.
+---The return value is only a hint: it has reported success for a call that
+---never reached the native, and for a write the host silently discarded. The
+---read-back is the actual arbiter.
 ---@param fileName string
 ---@param data string
 ---@return boolean ok, string? err, number onDisk
 local function writeVerified(fileName, data)
-    local reported = writeFile(fileName, data)
+    local reported, raw, mechanism = writeFile(fileName, data)
     local readBack = readFile(fileName)
     local onDisk = readBack and #readBack or 0
 
@@ -81,13 +131,14 @@ local function writeVerified(fileName, data)
         return true, nil, onDisk
     end
 
+    local detail = ('%s returned %s (%s)'):format(mechanism, tostring(raw), type(raw))
+
     if not readBack then
-        return false, ('SAVE_RESOURCE_FILE returned %s but produced no file')
-            :format(tostring(reported)), 0
+        return false, ('%s but produced no file'):format(detail), 0
     end
 
-    return false, ('SAVE_RESOURCE_FILE returned %s but %s is %d bytes on disk, not %d')
-        :format(tostring(reported), fileName, onDisk, #data), onDisk
+    return false, ('%s but %s is %d bytes on disk, not %d')
+        :format(detail, fileName, onDisk, #data), onDisk
 end
 
 Meta.writeFile = writeFile
@@ -459,57 +510,84 @@ function Meta.Diagnose()
     print(table.concat(lines, '\n'))
 end
 
----Write the same marker to several files and report which ones actually land.
+---Compare the CALL MECHANISMS against the same file.
 ---
----This isolates one variable: whether the manifest declaring a file (files{} +
----data_file) is what stops writes to it. handling.meta is declared, the others
----are not. The payload is a valid, tiny handling document carrying a random id,
----so writing it cannot corrupt anything, and the id can be grepped for on disk.
----@return table[] results
+---The filename is no longer the variable: a previous probe showed declared and
+---undeclared files failing identically. What differs is how the native is
+---reached, so each row here uses a different call and reports the raw return
+---value AND its Lua type, because `nil` and `false` are very different answers
+---and `nil` is what silently passed as success before.
+---@return table[] results, string id
 function Meta.Probe()
     local id = ('%d-%d'):format(math.random(1, 1e9), math.random(1, 1e9))
-    local payload = table.concat({
-        '<?xml version="1.0" encoding="UTF-8"?>',
-        ('<!-- vehicle-editor probe %s -->'):format(id),
-        '<CHandlingDataMgr>',
-        '  <HandlingData>',
-        '  </HandlingData>',
-        '</CHandlingDataMgr>',
-        '',
-    }, '\n')
 
-    local targets = {
-        { file = META_PATH,               declared = true  },
-        { file = State and State.PATH or 'tunes.json', declared = false, skipRestore = false },
-        { file = 'probe_undeclared.meta', declared = false },
-        { file = 'probe_undeclared.json', declared = false },
+    ---Each row gets DISTINCT bytes, built directly rather than by substitution.
+    ---Without that, a row whose write failed would read back the previous row's
+    ---identical file and be reported as working. (String substitution is a trap
+    ---here: the id contains a hyphen, which is a quantifier in a Lua pattern.)
+    local function payloadFor(row)
+        return table.concat({
+            '<?xml version="1.0" encoding="UTF-8"?>',
+            ('<!-- vehicle-editor probe %s row %d -->'):format(id, row),
+            '<CHandlingDataMgr>',
+            '  <HandlingData>',
+            '  </HandlingData>',
+            '</CHandlingDataMgr>',
+            '',
+        }, '\n')
+    end
+
+    local target = 'probe_mechanism.meta'
+
+    local attempts = {
+        {
+            label = 'SaveResourceFile(-1)',
+            run = function(data)
+                if type(capturedSave) ~= 'function' then return nil, 'global missing' end
+                return select(2, pcall(capturedSave, RESOURCE, target, data, -1))
+            end,
+        },
+        {
+            label = 'SaveResourceFile(#data)',
+            run = function(data)
+                if type(capturedSave) ~= 'function' then return nil, 'global missing' end
+                return select(2, pcall(capturedSave, RESOURCE, target, data, #data))
+            end,
+        },
+        {
+            label = 'InvokeNative + ResultAsInteger',
+            run = function(data)
+                return select(2, pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
+                    RESOURCE, target, data, #data, Citizen.ResultAsInteger()))
+            end,
+        },
+        {
+            label = 'InvokeNative, no hint',
+            run = function(data)
+                return select(2, pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
+                    RESOURCE, target, data, #data))
+            end,
+        },
     }
 
     local results = {}
 
-    for i = 1, #targets do
-        local target = targets[i]
+    for i = 1, #attempts do
+        local attempt = attempts[i]
 
-        -- Keep whatever is there so the probe never destroys real state.
-        local before = readFile(target.file)
-
-        local reported = writeFile(target.file, payload)
-        local readBack = readFile(target.file)
+        local data = payloadFor(i)
+        local raw, note = attempt.run(data)
+        local readBack = readFile(target)
 
         results[#results + 1] = {
-            file = target.file,
-            declared = target.declared,
-            returned = reported,
-            written = #payload,
+            label = attempt.label,
+            raw = raw,
+            rawType = type(raw),
+            note = note,
+            written = #data,
             onDisk = readBack and #readBack or 0,
-            matched = readBack == payload,
-            id = id,
+            matched = readBack == data,
         }
-
-        -- Put the original contents back for files that hold real data.
-        if target.file == META_PATH or target.file == (State and State.PATH) then
-            if before then writeFile(target.file, before) end
-        end
     end
 
     return results, id

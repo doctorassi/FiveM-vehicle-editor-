@@ -566,19 +566,89 @@ test('a shadowed SaveResourceFile global cannot break saving', function()
     assertClose(Store.Get('adder').values.fInitialDriveForce, 0.46, 1e-9, 'edit survived')
 end)
 
-test('nothing shipped calls the SaveResourceFile or LoadResourceFile globals', function()
-    -- The harness globals throw, so any shipped call site shows up here.
+test('a nil return from InvokeNative is a failure, not a success', function()
+    -- THE bug. `Citizen.InvokeNative(...) ~= 0` is TRUE when InvokeNative
+    -- returns nil, so every save reported success while writing nothing. With
+    -- the globals gone, the fallback is all that is left, and a nil from it
+    -- must not be mistaken for a write.
     seedFleet()
-    Store.SetValue('sultan', 'fBrakeForce', 1.24)
 
+    harness.globalsMissing = true
+    harness.installGlobals()
+    harness.invokeNativeReturnsNil = true
+    dofile('server/meta.lua')
+
+    local ok, err = quietly(function() return State.Save() end)
+
+    harness.invokeNativeReturnsNil = false
+    harness.globalsMissing = false
+    harness.installGlobals()
+    dofile('server/meta.lua')
+
+    assertEqual(ok, false, 'a nil return must not count as a saved file')
+    assertTrue(err, 'and it must say so')
+end)
+
+test('writeFile itself rejects a nil return, before verification sees it', function()
+    -- Targets the comparison directly. Going through the verified path would
+    -- pass either way, because the read-back catches it regardless -- and that
+    -- is exactly how a `nil ~= 0` returning true stayed hidden.
+    harness.globalsMissing = true
+    harness.installGlobals()
+    harness.invokeNativeReturnsNil = true
+    dofile('server/meta.lua')
+
+    local ok = Meta.writeFile('probe_nil_check.txt', 'anything')
+
+    harness.invokeNativeReturnsNil = false
+    harness.globalsMissing = false
+    harness.installGlobals()
+    dofile('server/meta.lua')
+
+    assertEqual(ok, false, 'nil must be false, not true — `nil ~= 0` is true in Lua')
+end)
+
+test('the write helper prefers the global and falls back to the hash call', function()
+    seedFleet()
+
+    -- Globals present: they are used.
+    harness.lastMechanism = nil
     State.Save()
-    Meta.Save()
+    assertEqual(harness.lastMechanism, 'SaveResourceFile', 'global preferred')
+
+    -- Globals gone: the hash call carries it.
+    harness.globalsMissing = true
+    harness.installGlobals()
+    dofile('server/meta.lua')
+
+    harness.lastMechanism = nil
+    local ok = State.Save()
+
+    harness.globalsMissing = false
+    harness.installGlobals()
+    dofile('server/meta.lua')
+
+    assertEqual(ok, true, 'saved via the fallback')
+    assertEqual(harness.lastMechanism, 'InvokeNative', 'fallback used')
+end)
+
+test('a global reassigned after load cannot break saving', function()
+    -- The globals are captured at load, so shadowing them later has no effect.
+    seedFleet()
+    Store.SetValue('adder', 'fBrakeForce', 1.37)
+
+    local realSave = SaveResourceFile
+    SaveResourceFile = function() return false end
+
+    local ok = State.Save()
+
+    SaveResourceFile = realSave
+
+    assertEqual(ok, true, 'still saved through the captured reference')
+
     Store.tunes = {}
     State.Load()
-    Meta.Load()
-    Meta.Diagnose()
-
-    assertClose(Store.Get('sultan').values.fBrakeForce, 1.24, 1e-9, 'round trip clean')
+    assertClose(Store.Get('adder').values.fBrakeForce, 1.37, 1e-9, 'edit survived')
 end)
 
 test('a refused write is reported rather than silently succeeding', function()
@@ -589,7 +659,7 @@ test('a refused write is reported rather than silently succeeding', function()
     end)
 
     assertEqual(ok, false, 'reported as failed')
-    assertTrue(err and err:find('SAVE_RESOURCE_FILE'), 'names the refusal: ' .. tostring(err))
+    assertTrue(err and err:find('returned'), 'names the refusal: ' .. tostring(err))
     assertTrue(State.lastError, 'error retained for the menu')
 end)
 
@@ -1005,7 +1075,7 @@ test('tunes.json reporting success while changing nothing is caught', function()
     harness.silentlyDiscard = {}
 
     assertEqual(ok, false, 'not reported as saved')
-    assertTrue(err and err:find('SAVE_RESOURCE_FILE'), 'names the native: ' .. tostring(err))
+    assertTrue(err and err:find('bytes on disk'), 'says what is there: ' .. tostring(err))
 end)
 
 test('a save that genuinely lands is still reported as success', function()
@@ -1018,47 +1088,42 @@ test('a save that genuinely lands is still reported as success', function()
     assertTrue(harness.files['handling.meta']:find('SULTAN', 1, true), 'content on disk')
 end)
 
-test('the probe separates a declared file from undeclared ones', function()
+test('the probe reports each mechanism separately', function()
     seedFleet()
-    State.Save()
-
-    -- Exactly the suspected mechanism: only the manifest-declared file refuses.
-    harness.silentlyDiscard = { ['handling.meta'] = true }
 
     local results, id = Meta.Probe()
 
-    harness.silentlyDiscard = {}
-
     assertTrue(id, 'marker id generated')
-    assertTrue(#results >= 4, 'probed several files')
+    assertEqual(#results, 4, 'four mechanisms tried')
 
-    local byFile = {}
-    for i = 1, #results do byFile[results[i].file] = results[i] end
+    local byLabel = {}
+    for i = 1, #results do byLabel[results[i].label] = results[i] end
 
-    assertEqual(byFile['handling.meta'].matched, false, 'declared file failed')
-    assertEqual(byFile['probe_undeclared.meta'].matched, true, 'undeclared .meta landed')
-    assertEqual(byFile['probe_undeclared.json'].matched, true, 'undeclared .json landed')
-    assertEqual(byFile['handling.meta'].declared, true, 'declared flag correct')
-    assertEqual(byFile['probe_undeclared.meta'].declared, false, 'undeclared flag correct')
+    assertTrue(byLabel['SaveResourceFile(-1)'], 'global with -1')
+    assertTrue(byLabel['InvokeNative + ResultAsInteger'], 'hash call')
+
+    for i = 1, #results do
+        assertEqual(results[i].matched, true, results[i].label .. ' landed')
+        assertTrue(results[i].rawType, 'reported the return type')
+    end
 end)
 
-test('the probe restores the real files it touched', function()
+test('the probe distinguishes a nil return from a false one', function()
+    -- nil means the call never reached the native; false means the native
+    -- refused. `nil ~= 0` being true is what hid this for so long, so the type
+    -- has to be visible in the output.
     seedFleet()
-    Store.SetValue('adder', 'fBrakeForce', 1.23)
-    Meta.Save()
-    State.Save()
 
-    local metaBefore = harness.files['handling.meta']
-    local stateBefore = harness.files['tunes.json']
+    harness.invokeNativeReturnsNil = true
+    local results = Meta.Probe()
+    harness.invokeNativeReturnsNil = false
 
-    Meta.Probe()
+    local byLabel = {}
+    for i = 1, #results do byLabel[results[i].label] = results[i] end
 
-    assertEqual(harness.files['handling.meta'], metaBefore, 'handling.meta restored')
-    assertEqual(harness.files['tunes.json'], stateBefore, 'tunes.json restored')
-
-    -- And the tunes are still loadable, i.e. nothing was corrupted.
-    Store.tunes = {}
-    assertTrue(State.Load() > 0, 'state still loads after probing')
+    assertEqual(byLabel['InvokeNative + ResultAsInteger'].rawType, 'nil', 'nil reported as nil')
+    assertEqual(byLabel['InvokeNative + ResultAsInteger'].matched, false, 'and as a failure')
+    assertEqual(byLabel['SaveResourceFile(-1)'].rawType, 'boolean', 'the global still returns a boolean')
 end)
 
 test('the probe reports when nothing lands at all', function()
@@ -1070,8 +1135,23 @@ test('the probe reports when nothing lands at all', function()
     harness.writesFail = false
 
     for i = 1, #results do
-        assertEqual(results[i].matched, false, results[i].file .. ' correctly reported as failed')
+        assertEqual(results[i].matched, false, results[i].label .. ' correctly reported as failed')
     end
+end)
+
+test('the probe never touches the real tune files', function()
+    seedFleet()
+    Store.SetValue('adder', 'fBrakeForce', 1.23)
+    Meta.Save()
+    State.Save()
+
+    local metaBefore = harness.files['handling.meta']
+    local stateBefore = harness.files['tunes.json']
+
+    Meta.Probe()
+
+    assertEqual(harness.files['handling.meta'], metaBefore, 'handling.meta untouched')
+    assertEqual(harness.files['tunes.json'], stateBefore, 'tunes.json untouched')
 end)
 
 --------------------------------------------------------------------------------

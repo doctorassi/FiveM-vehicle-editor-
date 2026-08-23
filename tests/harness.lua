@@ -16,20 +16,51 @@ local function installNatives()
 
     GetCurrentResourceName = function() return 'fivem-vehicle-editor' end
 
-    -- The resource invokes these by hash so a shadowed global cannot intercept
-    -- them, so the harness stubs Citizen.InvokeNative rather than the globals.
-    -- The globals below are deliberately left BROKEN: nothing shipped may call
-    -- them, and a test that starts passing through them will fail loudly.
+    -- Both IO mechanisms are modelled, because the resource prefers the
+    -- globals and falls back to Citizen.InvokeNative.
     local SAVE_RESOURCE_FILE = 0xA09E7E7B
     local LOAD_RESOURCE_FILE = 0x76A9EE1F
 
-    ---Set by a test to make writes fail, mimicking a refused write.
+    ---Make every write fail outright.
     harness.writesFail = false
 
-    ---Filenames whose writes are silently discarded while SAVE_RESOURCE_FILE
-    ---still returns true. This is the reported host's behaviour for the file
-    ---the manifest declares.
+    ---Filenames whose writes are silently discarded while the call still
+    ---reports success -- the reported host's behaviour.
     harness.silentlyDiscard = {}
+
+    ---Remove the globals entirely, forcing the InvokeNative fallback.
+    harness.globalsMissing = false
+
+    ---Make InvokeNative return nil, as it does on the reported host. `nil ~= 0`
+    ---is true in Lua, which is what made every save report success.
+    harness.invokeNativeReturnsNil = false
+
+    ---Which mechanism actually performed the last write.
+    harness.lastMechanism = nil
+
+    local function performWrite(path, data, mechanism)
+        if harness.writesFail then return false end
+        harness.lastMechanism = mechanism
+        if harness.silentlyDiscard[path] then return true end
+        harness.files[path] = data
+        return true
+    end
+
+    local function installGlobals()
+        if harness.globalsMissing then
+            SaveResourceFile, LoadResourceFile = nil, nil
+            return
+        end
+
+        SaveResourceFile = function(_, path, data)
+            return performWrite(path, data, 'SaveResourceFile')
+        end
+
+        LoadResourceFile = function(_, path) return harness.files[path] end
+    end
+
+    harness.installGlobals = installGlobals
+    installGlobals()
 
     Citizen = {
         ResultAsInteger = function() return '__resultAsInteger' end,
@@ -38,12 +69,8 @@ local function installNatives()
             local args = { ... }
 
             if hash == SAVE_RESOURCE_FILE then
-                local path, data = args[2], args[3]
-                if harness.writesFail then return 0 end
-                -- Reports success, changes nothing.
-                if harness.silentlyDiscard[path] then return 1 end
-                harness.files[path] = data
-                return 1
+                if harness.invokeNativeReturnsNil then return nil end
+                return performWrite(args[2], args[3], 'InvokeNative') and 1 or 0
             end
 
             if hash == LOAD_RESOURCE_FILE then
@@ -53,14 +80,6 @@ local function installNatives()
             error(('unexpected native 0x%X'):format(hash))
         end,
     }
-
-    LoadResourceFile = function()
-        error('shipped code must not use the LoadResourceFile global', 2)
-    end
-
-    SaveResourceFile = function()
-        error('shipped code must not use the SaveResourceFile global', 2)
-    end
 
     ---Ace state the tests can flip.
     harness.aceAllowed = {}

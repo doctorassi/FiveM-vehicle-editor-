@@ -350,8 +350,9 @@ end, false)
 ---Ask a client to re-run the vanilla capture. Capture has to happen on a
 ---client because reading handling requires a spawned vehicle, so this targets
 ---an admin who is in game.
----The controlled experiment: write the same bytes to a declared file and to
----undeclared ones, and report which land. Whatever the result, it is decisive.
+---The controlled experiment. The filename is not the variable -- an earlier
+---probe showed declared and undeclared files failing identically -- so this
+---compares how the native is reached.
 RegisterCommand('vehedit_probe', function(source)
     if not Store.CanEdit(source) then
         return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
@@ -359,46 +360,36 @@ RegisterCommand('vehedit_probe', function(source)
 
     local results, id = Meta.Probe()
 
-    print('[vehicle-editor] write probe — marker id ' .. id)
-    print('  file                    declared  returned  written  on disk  matched')
+    print('[vehicle-editor] write mechanism probe — marker id ' .. id)
+    print('  mechanism                      returned      type      written  on disk  matched')
 
-    local declaredOk, undeclaredOk, undeclaredTotal = true, 0, 0
+    local working = {}
 
     for i = 1, #results do
         local r = results[i]
 
-        print(('  %-22s  %-8s  %-8s  %-7d  %-7d  %s'):format(
-            r.file,
-            r.declared and 'yes' or 'no',
-            tostring(r.returned),
+        print(('  %-30s %-13s %-9s %-8d %-8d %s'):format(
+            r.label,
+            r.note or tostring(r.raw),
+            r.rawType,
             r.written,
             r.onDisk,
             r.matched and 'YES' or 'NO'))
 
-        if r.declared then
-            declaredOk = r.matched
-        else
-            undeclaredTotal = undeclaredTotal + 1
-            if r.matched then undeclaredOk = undeclaredOk + 1 end
-        end
+        if r.matched then working[#working + 1] = r.label end
     end
 
     print('')
 
-    if declaredOk and undeclaredOk == undeclaredTotal then
-        print('  Every write landed. The write path is fine and the problem is elsewhere;')
-        print(('  grep the resource folder for "%s" to confirm on disk.'):format(id))
-    elseif not declaredOk and undeclaredOk == undeclaredTotal then
-        print('  Only the manifest-declared file failed. files{} / data_file is the cause:')
-        print('  the resource system holds that file, so writes to it cannot land.')
-        print('  Fix: generate to a filename the manifest does not declare.')
-    elseif undeclaredOk == 0 then
-        print('  Nothing landed, declared or not. The resource folder is not being')
-        print('  written at all, so the editor has been running from memory and')
-        print('  nothing would survive a restart. Check folder permissions, antivirus,')
-        print('  and whether the server is running this folder from a cache copy.')
+    if #working > 0 then
+        print(('  These work: %s'):format(table.concat(working, ', ')))
+        print('  The editor uses the first working mechanism automatically.')
     else
-        print('  Mixed result — compare the rows above; the differing column is the cause.')
+        print('  No mechanism could write. Note the "type" column: a nil return')
+        print('  means the call never reached the native, which is different from')
+        print('  a false return meaning the native refused. Check that the server')
+        print('  process can write to the path below, and that no antivirus or')
+        print('  Controlled Folder Access is blocking FXServer.')
     end
 
     if type(GetResourcePath) == 'function' then
@@ -490,6 +481,13 @@ AddEventHandler('onResourceStart', function(resource)
 
     print(('[vehicle-editor] ready — %d/%d vehicle(s) restored from %s')
         :format(loaded, #Config.Vehicles, migrated and 'handling.meta' or State.PATH))
+
+    -- Nothing on disk at all is worth saying out loud: it means every edit so
+    -- far lived only in memory and did not survive the last restart.
+    if loaded == 0 and not Meta.readFile(State.PATH) then
+        print(('[vehicle-editor] no %s on disk — nothing has been saved yet.'):format(State.PATH))
+        print('[vehicle-editor] if this persists after editing, run vehedit_probe.')
+    end
 
     if migrated then
         print('[vehicle-editor] migrating state into ' .. State.PATH)
