@@ -96,6 +96,7 @@ dialog also offers to restore the vanilla value.
 | `vehedit_reload` | Re-read the saved tunes from disk |
 | `vehedit_diag` | Print save diagnostics, then attempt a write |
 | `vehedit_snapshot` | Re-run the vanilla capture for any vehicle still missing one |
+| `vehedit_probe` | Write the same marker to declared and undeclared files and report which land |
 | `vehedit_testwrite` | Write and read back a test file, to check file writing on its own |
 
 ## Configuration
@@ -234,6 +235,28 @@ Diagnostics tell the two failure modes apart by round-tripping a scratch file
 the manifest does not declare. If that succeeds, the folder is writable and only
 `handling.meta` is locked; if it fails, the server process cannot write into the
 resource folder at all.
+
+### Verifying writes
+
+Every save is confirmed by reading the file back and comparing it to what was
+written. This is not belt-and-braces: on at least one host `SAVE_RESOURCE_FILE`
+returns `true` for `handling.meta` while the bytes on disk never change, so the
+return value alone will happily report a successful save over an untouched file.
+A save that did not land is reported as a failure with the size actually on disk.
+
+`vehedit_probe` isolates the cause when that happens. It writes the same marker
+payload to `handling.meta` (which the manifest declares via `files{}` +
+`data_file`) and to filenames the manifest does not declare, then reports which
+ones landed:
+
+- only the declared file fails → the resource system holding that file is the
+  cause, and the generated file needs a name the manifest does not claim
+- nothing lands at all → the resource folder is not being written, so the editor
+  is running from memory and nothing survives a restart
+- everything lands → the write path is fine and the marker id can be grepped for
+  on disk to prove it
+
+The probe restores the real contents of any file it touches.
 
 ### File writing
 

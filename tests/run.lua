@@ -589,7 +589,7 @@ test('a refused write is reported rather than silently succeeding', function()
     end)
 
     assertEqual(ok, false, 'reported as failed')
-    assertTrue(err and err:find('refused'), 'names the refusal: ' .. tostring(err))
+    assertTrue(err and err:find('SAVE_RESOURCE_FILE'), 'names the refusal: ' .. tostring(err))
     assertTrue(State.lastError, 'error retained for the menu')
 end)
 
@@ -613,10 +613,13 @@ test('a repeated handling.meta failure is only reported once', function()
         if tostring(text):find('could not write handling.meta', 1, true) then count = count + 1 end
     end
 
+    -- Each save must produce different bytes, otherwise the file already on
+    -- disk matches what we tried to write and verification legitimately passes.
     harness.writesFail = true
-    Meta.Save()
-    Meta.Save()
-    Meta.Save()
+    for i = 1, 3 do
+        Store.SetValue('sultan', 'fBrakeForce', 1.0 + i * 0.01)
+        Meta.Save()
+    end
     harness.writesFail = false
 
     print = realPrint
@@ -653,7 +656,7 @@ test('diagnostics name the resource and both files', function()
     assertTrue(text:find('fivem%-vehicle%-editor'), 'names the resource')
     assertTrue(text:find('tunes.json', 1, true), 'names the state file')
     assertTrue(text:find('handling.meta', 1, true), 'names the meta file')
-    assertTrue(text:find('vehedit_testwrite', 1, true), 'points at the write test')
+    assertTrue(text:find('vehedit_probe', 1, true), 'points at the probe')
 end)
 
 test('the resource loads in a runtime without package, io or os', function()
@@ -967,6 +970,111 @@ test('optional fields absent from a snapshot are fine', function()
 end)
 
 --------------------------------------------------------------------------------
+print('\nwrites that lie')
+--------------------------------------------------------------------------------
+-- The reported host: SAVE_RESOURCE_FILE returns true for handling.meta while
+-- the bytes on disk never change. Trusting that return value is what made the
+-- console report "all entries saved" over an untouched file.
+
+test('handling.meta reporting success while changing nothing is caught', function()
+    seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.41)
+
+    harness.silentlyDiscard = { ['handling.meta'] = true }
+    harness.files['handling.meta'] = 'stale skeleton'
+
+    local ok, err = quietly(function() return Meta.Save() end)
+
+    harness.silentlyDiscard = {}
+
+    assertEqual(ok, false, 'not reported as saved')
+    assertTrue(err and err:find('on disk'), 'says what is actually there: ' .. tostring(err))
+    assertEqual(harness.files['handling.meta'], 'stale skeleton', 'the file really was untouched')
+end)
+
+test('tunes.json reporting success while changing nothing is caught', function()
+    -- The same check has to cover the state file: it is the one that matters,
+    -- and nothing had been verifying it either.
+    seedFleet()
+
+    harness.silentlyDiscard = { ['tunes.json'] = true }
+    harness.files['tunes.json'] = 'stale'
+
+    local ok, err = quietly(function() return State.Save() end)
+
+    harness.silentlyDiscard = {}
+
+    assertEqual(ok, false, 'not reported as saved')
+    assertTrue(err and err:find('SAVE_RESOURCE_FILE'), 'names the native: ' .. tostring(err))
+end)
+
+test('a save that genuinely lands is still reported as success', function()
+    seedFleet()
+    Store.SetValue('sultan', 'fBrakeForce', 1.19)
+
+    local ok, err, entries = Meta.Save()
+    assertEqual(ok, true, 'saved: ' .. tostring(err))
+    assertEqual(entries, #Config.Vehicles, 'entries counted')
+    assertTrue(harness.files['handling.meta']:find('SULTAN', 1, true), 'content on disk')
+end)
+
+test('the probe separates a declared file from undeclared ones', function()
+    seedFleet()
+    State.Save()
+
+    -- Exactly the suspected mechanism: only the manifest-declared file refuses.
+    harness.silentlyDiscard = { ['handling.meta'] = true }
+
+    local results, id = Meta.Probe()
+
+    harness.silentlyDiscard = {}
+
+    assertTrue(id, 'marker id generated')
+    assertTrue(#results >= 4, 'probed several files')
+
+    local byFile = {}
+    for i = 1, #results do byFile[results[i].file] = results[i] end
+
+    assertEqual(byFile['handling.meta'].matched, false, 'declared file failed')
+    assertEqual(byFile['probe_undeclared.meta'].matched, true, 'undeclared .meta landed')
+    assertEqual(byFile['probe_undeclared.json'].matched, true, 'undeclared .json landed')
+    assertEqual(byFile['handling.meta'].declared, true, 'declared flag correct')
+    assertEqual(byFile['probe_undeclared.meta'].declared, false, 'undeclared flag correct')
+end)
+
+test('the probe restores the real files it touched', function()
+    seedFleet()
+    Store.SetValue('adder', 'fBrakeForce', 1.23)
+    Meta.Save()
+    State.Save()
+
+    local metaBefore = harness.files['handling.meta']
+    local stateBefore = harness.files['tunes.json']
+
+    Meta.Probe()
+
+    assertEqual(harness.files['handling.meta'], metaBefore, 'handling.meta restored')
+    assertEqual(harness.files['tunes.json'], stateBefore, 'tunes.json restored')
+
+    -- And the tunes are still loadable, i.e. nothing was corrupted.
+    Store.tunes = {}
+    assertTrue(State.Load() > 0, 'state still loads after probing')
+end)
+
+test('the probe reports when nothing lands at all', function()
+    seedFleet()
+    harness.writesFail = true
+
+    local results = Meta.Probe()
+
+    harness.writesFail = false
+
+    for i = 1, #results do
+        assertEqual(results[i].matched, false, results[i].file .. ' correctly reported as failed')
+    end
+end)
+
+--------------------------------------------------------------------------------
 print('\nox_core integration')
 --------------------------------------------------------------------------------
 
@@ -1196,7 +1304,8 @@ test('every console command runs without throwing', function()
     bootMain()
 
     for _, name in ipairs({ 'vehedit_autoall', 'vehedit_save', 'vehedit_diag',
-                            'vehedit_testwrite', 'vehedit_reload' }) do
+                            'vehedit_testwrite', 'vehedit_probe', 'vehedit_snapshot',
+                            'vehedit_reload' }) do
         local command = harness.commands[name]
         assertTrue(command, name .. ' is registered')
 

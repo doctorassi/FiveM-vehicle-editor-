@@ -26,6 +26,11 @@ local function installNatives()
     ---Set by a test to make writes fail, mimicking a refused write.
     harness.writesFail = false
 
+    ---Filenames whose writes are silently discarded while SAVE_RESOURCE_FILE
+    ---still returns true. This is the reported host's behaviour for the file
+    ---the manifest declares.
+    harness.silentlyDiscard = {}
+
     Citizen = {
         ResultAsInteger = function() return '__resultAsInteger' end,
         ResultAsString = function() return '__resultAsString' end,
@@ -35,6 +40,8 @@ local function installNatives()
             if hash == SAVE_RESOURCE_FILE then
                 local path, data = args[2], args[3]
                 if harness.writesFail then return 0 end
+                -- Reports success, changes nothing.
+                if harness.silentlyDiscard[path] then return 1 end
                 harness.files[path] = data
                 return 1
             end
@@ -86,6 +93,7 @@ local function installNatives()
     -- ox_core is absent under test, so the integration stays dormant and its
     -- pure helpers can still be exercised.
     GetResourceState = function() return 'missing' end
+    GetPlayers = function() return {} end
     NetworkGetNetworkIdFromEntity = function(entity) return entity end
     DoesEntityExist = function(entity) return entity ~= nil and entity ~= 0 end
 

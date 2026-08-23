@@ -289,14 +289,14 @@ RegisterCommand('vehedit_save', function(source)
     if not Store.CanEdit(source) then
         return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
     end
-    local stateOk = State.Save()
-    local metaOk, _, entries = Meta.Save()
+    local stateOk, stateErr = State.Save()
+    local metaOk, metaErr, entries = Meta.Save()
 
-    print(('[vehicle-editor] %s: %s | handling.meta: %s'):format(
-        State.PATH,
-        stateOk and 'saved' or 'FAILED',
-        metaOk and ('saved with %d entr%s'):format(entries or 0, (entries or 0) == 1 and 'y' or 'ies')
-            or 'not written (see diagnostics above)'))
+    print(('[vehicle-editor] %s: %s'):format(State.PATH,
+        stateOk and 'verified on disk' or ('FAILED — ' .. tostring(stateErr))))
+    print(('[vehicle-editor] handling.meta: %s'):format(
+        metaOk and ('verified on disk, %d entr%s'):format(entries or 0, (entries or 0) == 1 and 'y' or 'ies')
+            or ('FAILED — ' .. tostring(metaErr))))
 end, false)
 
 RegisterCommand('vehedit_diag', function(source)
@@ -350,6 +350,63 @@ end, false)
 ---Ask a client to re-run the vanilla capture. Capture has to happen on a
 ---client because reading handling requires a spawned vehicle, so this targets
 ---an admin who is in game.
+---The controlled experiment: write the same bytes to a declared file and to
+---undeclared ones, and report which land. Whatever the result, it is decisive.
+RegisterCommand('vehedit_probe', function(source)
+    if not Store.CanEdit(source) then
+        return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
+    end
+
+    local results, id = Meta.Probe()
+
+    print('[vehicle-editor] write probe — marker id ' .. id)
+    print('  file                    declared  returned  written  on disk  matched')
+
+    local declaredOk, undeclaredOk, undeclaredTotal = true, 0, 0
+
+    for i = 1, #results do
+        local r = results[i]
+
+        print(('  %-22s  %-8s  %-8s  %-7d  %-7d  %s'):format(
+            r.file,
+            r.declared and 'yes' or 'no',
+            tostring(r.returned),
+            r.written,
+            r.onDisk,
+            r.matched and 'YES' or 'NO'))
+
+        if r.declared then
+            declaredOk = r.matched
+        else
+            undeclaredTotal = undeclaredTotal + 1
+            if r.matched then undeclaredOk = undeclaredOk + 1 end
+        end
+    end
+
+    print('')
+
+    if declaredOk and undeclaredOk == undeclaredTotal then
+        print('  Every write landed. The write path is fine and the problem is elsewhere;')
+        print(('  grep the resource folder for "%s" to confirm on disk.'):format(id))
+    elseif not declaredOk and undeclaredOk == undeclaredTotal then
+        print('  Only the manifest-declared file failed. files{} / data_file is the cause:')
+        print('  the resource system holds that file, so writes to it cannot land.')
+        print('  Fix: generate to a filename the manifest does not declare.')
+    elseif undeclaredOk == 0 then
+        print('  Nothing landed, declared or not. The resource folder is not being')
+        print('  written at all, so the editor has been running from memory and')
+        print('  nothing would survive a restart. Check folder permissions, antivirus,')
+        print('  and whether the server is running this folder from a cache copy.')
+    else
+        print('  Mixed result — compare the rows above; the differing column is the cause.')
+    end
+
+    if type(GetResourcePath) == 'function' then
+        local ok, path = pcall(GetResourcePath, GetCurrentResourceName())
+        if ok then print(('  resource path: %s'):format(tostring(path))) end
+    end
+end, false)
+
 RegisterCommand('vehedit_snapshot', function(source)
     if not Store.CanEdit(source) then
         return print('[vehicle-editor] denied: missing ' .. Config.AcePermission)
@@ -362,13 +419,17 @@ RegisterCommand('vehedit_snapshot', function(source)
 
     local target = source
 
-    if target == 0 then
+    if target == 0 and type(GetPlayers) == 'function' then
         -- From the console: pick any admin who is in game.
-        for _, playerId in ipairs(GetPlayers()) do
-            local id = tonumber(playerId)
-            if id and Store.CanEdit(id) then
-                target = id
-                break
+        local ok, players = pcall(GetPlayers)
+
+        if ok and type(players) == 'table' then
+            for _, playerId in ipairs(players) do
+                local id = tonumber(playerId)
+                if id and Store.CanEdit(id) then
+                    target = id
+                    break
+                end
             end
         end
     end

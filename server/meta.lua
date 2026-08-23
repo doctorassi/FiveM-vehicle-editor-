@@ -62,8 +62,37 @@ local function readFile(fileName)
         Citizen.ResultAsString())
 end
 
+---Write a file and prove it landed by reading it back.
+---
+---SAVE_RESOURCE_FILE cannot be trusted on its own: on at least one host it
+---returns true for a file the manifest declares while the bytes on disk never
+---change. Reporting that as a successful save is worse than failing, because it
+---sends you looking everywhere except at the write. LOAD_RESOURCE_FILE does
+---return real on-disk content here, so the comparison is meaningful.
+---@param fileName string
+---@param data string
+---@return boolean ok, string? err, number onDisk
+local function writeVerified(fileName, data)
+    local reported = writeFile(fileName, data)
+    local readBack = readFile(fileName)
+    local onDisk = readBack and #readBack or 0
+
+    if readBack == data then
+        return true, nil, onDisk
+    end
+
+    if not readBack then
+        return false, ('SAVE_RESOURCE_FILE returned %s but produced no file')
+            :format(tostring(reported)), 0
+    end
+
+    return false, ('SAVE_RESOURCE_FILE returned %s but %s is %d bytes on disk, not %d')
+        :format(tostring(reported), fileName, onDisk, #data), onDisk
+end
+
 Meta.writeFile = writeFile
 Meta.readFile = readFile
+Meta.writeVerified = writeVerified
 local COMMENT_TAG = 'vehicle-editor'
 -- The tag contains a `-`, which is a quantifier in Lua patterns, so every
 -- pattern that looks for it must use the escaped form.
@@ -398,15 +427,26 @@ Meta.lastError = nil
 ---How many vehicles made it into the last written file.
 Meta.entries = 0
 
----Report what the editor is writing and where.
+---Report what the editor is writing and, more usefully, what is actually on
+---disk afterwards. A mismatch between the two is the entire bug in one line.
 function Meta.Diagnose()
+    local function sizeOf(path)
+        local content = readFile(path)
+        return content and #content or nil
+    end
+
+    local metaSize = sizeOf(META_PATH)
+    local stateSize = sizeOf(State and State.PATH or 'tunes.json')
+
     local lines = {
         '[vehicle-editor] save diagnostics',
         ('  resource name    : %s'):format(tostring(RESOURCE)),
-        ('  state file       : %s (%s)'):format(
-            State and State.PATH or 'tunes.json',
+        ('  %-16s : %s on disk | %s'):format(META_PATH,
+            metaSize and (metaSize .. ' bytes') or 'missing',
+            Meta.lastError or ('ok, ' .. tostring(Meta.entries) .. ' entries')),
+        ('  %-16s : %s on disk | %s'):format(State and State.PATH or 'tunes.json',
+            stateSize and (stateSize .. ' bytes') or 'missing',
             State and (State.lastError or 'ok') or 'unknown'),
-        ('  handling.meta    : %s'):format(Meta.lastError or 'ok'),
     }
 
     if type(GetResourcePath) == 'function' then
@@ -414,9 +454,65 @@ function Meta.Diagnose()
         lines[#lines + 1] = ('  resource path    : %s'):format(ok and tostring(path) or 'unavailable')
     end
 
-    lines[#lines + 1] = '  Run vehedit_testwrite to check file writing on its own.'
+    lines[#lines + 1] = '  Run vehedit_probe to test each file individually.'
 
     print(table.concat(lines, '\n'))
+end
+
+---Write the same marker to several files and report which ones actually land.
+---
+---This isolates one variable: whether the manifest declaring a file (files{} +
+---data_file) is what stops writes to it. handling.meta is declared, the others
+---are not. The payload is a valid, tiny handling document carrying a random id,
+---so writing it cannot corrupt anything, and the id can be grepped for on disk.
+---@return table[] results
+function Meta.Probe()
+    local id = ('%d-%d'):format(math.random(1, 1e9), math.random(1, 1e9))
+    local payload = table.concat({
+        '<?xml version="1.0" encoding="UTF-8"?>',
+        ('<!-- vehicle-editor probe %s -->'):format(id),
+        '<CHandlingDataMgr>',
+        '  <HandlingData>',
+        '  </HandlingData>',
+        '</CHandlingDataMgr>',
+        '',
+    }, '\n')
+
+    local targets = {
+        { file = META_PATH,               declared = true  },
+        { file = State and State.PATH or 'tunes.json', declared = false, skipRestore = false },
+        { file = 'probe_undeclared.meta', declared = false },
+        { file = 'probe_undeclared.json', declared = false },
+    }
+
+    local results = {}
+
+    for i = 1, #targets do
+        local target = targets[i]
+
+        -- Keep whatever is there so the probe never destroys real state.
+        local before = readFile(target.file)
+
+        local reported = writeFile(target.file, payload)
+        local readBack = readFile(target.file)
+
+        results[#results + 1] = {
+            file = target.file,
+            declared = target.declared,
+            returned = reported,
+            written = #payload,
+            onDisk = readBack and #readBack or 0,
+            matched = readBack == payload,
+            id = id,
+        }
+
+        -- Put the original contents back for files that hold real data.
+        if target.file == META_PATH or target.file == (State and State.PATH) then
+            if before then writeFile(target.file, before) end
+        end
+    end
+
+    return results, id
 end
 
 ---True once a handling.meta failure has been reported, so a host where the file
@@ -427,7 +523,9 @@ local warned = false
 function Meta.Save()
     local xml, entries = Meta.Build(Meta.preserved)
 
-    if writeFile(META_PATH, xml) then
+    local ok, writeErr = writeVerified(META_PATH, xml)
+
+    if ok then
         if Meta.lastError then
             print('[vehicle-editor] handling.meta is writable again.')
         end
@@ -451,7 +549,7 @@ function Meta.Save()
         return true, nil, entries
     end
 
-    local err = ('SAVE_RESOURCE_FILE refused "%s" (%d bytes)'):format(META_PATH, #xml)
+    local err = writeErr or ('SAVE_RESOURCE_FILE refused "%s" (%d bytes)'):format(META_PATH, #xml)
 
     Meta.lastError = err
 
@@ -523,13 +621,15 @@ end
 function State.Save()
     local encoded = json.encode(State.Build())
 
-    if writeFile(STATE_PATH, encoded) then
+    local ok, writeErr = Meta.writeVerified(STATE_PATH, encoded)
+
+    if ok then
         State.lastError = nil
         Store.debugPrint(('wrote %s (%d bytes)'):format(STATE_PATH, #encoded))
         return true, nil
     end
 
-    local err = ('SAVE_RESOURCE_FILE refused "%s" (%d bytes)'):format(STATE_PATH, #encoded)
+    local err = writeErr or ('SAVE_RESOURCE_FILE refused "%s" (%d bytes)'):format(STATE_PATH, #encoded)
 
     State.lastError = err
     print('[vehicle-editor] FAILED to save ' .. STATE_PATH .. ': ' .. err)
