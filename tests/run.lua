@@ -589,6 +589,29 @@ test('a nil return from InvokeNative is a failure, not a success', function()
     assertTrue(err, 'and it must say so')
 end)
 
+test('natives exposed through a metatable are still found', function()
+    -- CFX resolves natives via an __index metamethod on _G, so rawget(_G, ...)
+    -- returns nil for them. Capturing with rawget made the resource report
+    -- "global missing" and fall through to a call that could not write.
+    seedFleet()
+
+    harness.installGlobalsViaMetatable()
+    assertEqual(rawget(_G, 'SaveResourceFile'), nil, 'rawget really does miss it')
+    assertTrue(SaveResourceFile, 'but a normal read resolves it')
+
+    dofile('server/meta.lua')
+
+    harness.lastMechanism = nil
+    local ok = State.Save()
+
+    harness.clearGlobalMetatable()
+    harness.installGlobals()
+    dofile('server/meta.lua')
+
+    assertEqual(ok, true, 'saved through the metatable-exposed global')
+    assertEqual(harness.lastMechanism, 'SaveResourceFile', 'and used the global, not the fallback')
+end)
+
 test('writeFile itself rejects a nil return, before verification sees it', function()
     -- Targets the comparison directly. Going through the verified path would
     -- pass either way, because the read-back catches it regardless -- and that
@@ -1094,18 +1117,38 @@ test('the probe reports each mechanism separately', function()
     local results, id = Meta.Probe()
 
     assertTrue(id, 'marker id generated')
-    assertEqual(#results, 4, 'four mechanisms tried')
+    -- Three mechanisms per resource-name spelling.
+    assertTrue(#results >= 3, 'several combinations tried, got ' .. #results)
 
-    local byLabel = {}
-    for i = 1, #results do byLabel[results[i].label] = results[i] end
-
-    assertTrue(byLabel['SaveResourceFile(-1)'], 'global with -1')
-    assertTrue(byLabel['InvokeNative + ResultAsInteger'], 'hash call')
-
+    local sawGlobal, sawNative = false, false
     for i = 1, #results do
+        if results[i].label:find('SaveResourceFile', 1, true) then sawGlobal = true end
+        if results[i].label:find('InvokeNative', 1, true) then sawNative = true end
         assertEqual(results[i].matched, true, results[i].label .. ' landed')
         assertTrue(results[i].rawType, 'reported the return type')
     end
+
+    assertTrue(sawGlobal, 'the global was tried')
+    assertTrue(sawNative, 'the hash call was tried')
+end)
+
+test('the probe tries every resource-name spelling', function()
+    seedFleet()
+
+    local results = Meta.Probe()
+    local names = {}
+
+    for i = 1, #results do
+        local name = results[i].label:match('as (.+)$')
+        if name then names[name] = true end
+    end
+
+    local count = 0
+    for _ in pairs(names) do count = count + 1 end
+
+    -- SAVE_RESOURCE_FILE returns false for a name it cannot resolve, and FiveM
+    -- is not consistent about case, so the spelling has to be a variable.
+    assertTrue(count >= 2, 'more than one spelling probed, got ' .. count)
 end)
 
 test('the probe distinguishes a nil return from a false one', function()
@@ -1118,12 +1161,21 @@ test('the probe distinguishes a nil return from a false one', function()
     local results = Meta.Probe()
     harness.invokeNativeReturnsNil = false
 
-    local byLabel = {}
-    for i = 1, #results do byLabel[results[i].label] = results[i] end
+    local sawNilNative, sawBooleanGlobal = false, false
 
-    assertEqual(byLabel['InvokeNative + ResultAsInteger'].rawType, 'nil', 'nil reported as nil')
-    assertEqual(byLabel['InvokeNative + ResultAsInteger'].matched, false, 'and as a failure')
-    assertEqual(byLabel['SaveResourceFile(-1)'].rawType, 'boolean', 'the global still returns a boolean')
+    for i = 1, #results do
+        local r = results[i]
+        if r.label:find('InvokeNative', 1, true) and r.rawType == 'nil' then
+            sawNilNative = true
+            assertEqual(r.matched, false, 'a nil return is reported as a failure')
+        end
+        if r.label:find('SaveResourceFile', 1, true) and r.rawType == 'boolean' then
+            sawBooleanGlobal = true
+        end
+    end
+
+    assertTrue(sawNilNative, 'a nil return was surfaced as nil')
+    assertTrue(sawBooleanGlobal, 'the global still returns a boolean')
 end)
 
 test('the probe reports when nothing lands at all', function()

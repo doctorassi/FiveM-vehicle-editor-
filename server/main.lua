@@ -361,14 +361,14 @@ RegisterCommand('vehedit_probe', function(source)
     local results, id = Meta.Probe()
 
     print('[vehicle-editor] write mechanism probe — marker id ' .. id)
-    print('  mechanism                      returned      type      written  on disk  matched')
+    print('  mechanism                                  returned       type      written  on disk  matched')
 
     local working = {}
 
     for i = 1, #results do
         local r = results[i]
 
-        print(('  %-30s %-13s %-9s %-8d %-8d %s'):format(
+        print(('  %-42s %-14s %-9s %-8d %-8d %s'):format(
             r.label,
             r.note or tostring(r.raw),
             r.rawType,
@@ -383,13 +383,18 @@ RegisterCommand('vehedit_probe', function(source)
 
     if #working > 0 then
         print(('  These work: %s'):format(table.concat(working, ', ')))
-        print('  The editor uses the first working mechanism automatically.')
+        print('  The editor picks a working combination automatically.')
+        print(('  Currently writing as resource name "%s" via %s.')
+            :format(tostring(Meta.resourceName), tostring(Meta.mechanism or 'not yet written')))
     else
-        print('  No mechanism could write. Note the "type" column: a nil return')
-        print('  means the call never reached the native, which is different from')
-        print('  a false return meaning the native refused. Check that the server')
-        print('  process can write to the path below, and that no antivirus or')
-        print('  Controlled Folder Access is blocking FXServer.')
+        print('  No combination could write. Read the "type" column: nil means the')
+        print('  call never reached the native, false means the native refused.')
+        print('')
+        print('  All false, every spelling: the native is resolving but rejecting the')
+        print('  write. Compare against a minimal test resource on this same server —')
+        print('  if that one writes, the difference is this resource, not the folder.')
+        print('  Check that no antivirus or Controlled Folder Access is blocking')
+        print('  FXServer, and that the path below is writable by the server process.')
     end
 
     if type(GetResourcePath) == 'function' then

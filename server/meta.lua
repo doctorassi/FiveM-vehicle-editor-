@@ -45,8 +45,38 @@ local LEGACY_PATH = 'data/handling.meta'
 local SAVE_RESOURCE_FILE = 0xA09E7E7B
 local LOAD_RESOURCE_FILE = 0x76A9EE1F
 
-local capturedSave = rawget(_G, 'SaveResourceFile')
-local capturedLoad = rawget(_G, 'LoadResourceFile')
+-- Captured through NORMAL global access, not rawget. CFX exposes natives via an
+-- __index metamethod on the global table, so rawget bypasses the lookup and
+-- returns nil -- which is what made these read as "global missing". Reading them
+-- normally resolves the native once; holding the result in a local then gives
+-- the shadowing protection rawget was meant to provide.
+local capturedSave = SaveResourceFile
+local capturedLoad = LoadResourceFile
+
+---Resource-name spellings to try. SAVE_RESOURCE_FILE looks the resource up by
+---name and returns false when it cannot find it, and FiveM is not consistent
+---about case: this resource's script paths appear lowercased while
+---GetCurrentResourceName reports the folder's capitalisation. Rather than guess,
+---try each spelling and remember the one that works.
+local nameCandidates = {}
+do
+    local seen = {}
+    local function add(name)
+        if type(name) == 'string' and name ~= '' and not seen[name] then
+            seen[name] = true
+            nameCandidates[#nameCandidates + 1] = name
+        end
+    end
+
+    add(RESOURCE)
+    if type(RESOURCE) == 'string' then
+        add(RESOURCE:lower())
+        add(RESOURCE:upper())
+    end
+end
+
+---The spelling that last worked, tried first from then on.
+Meta.resourceName = RESOURCE
 
 ---Only an explicit true or 1 counts.
 ---
@@ -63,39 +93,70 @@ end
 ---How the last write was performed, for the diagnostics.
 Meta.mechanism = nil
 
+---Attempt one write with one mechanism and one resource-name spelling.
+---@return boolean ok, any raw
+local function attemptWrite(resourceName, fileName, data)
+    local lastRaw, lastMechanism
+
+    -- The documented call is the plain global:
+    --   SaveResourceFile(resourceName, fileName, data, dataLength)
+    -- with dataLength an integer, -1 meaning "the whole string". Both forms are
+    -- tried because builds differ on whether -1 is honoured.
+    if type(capturedSave) == 'function' then
+        for _, length in ipairs({ -1, #data }) do
+            local called, result = pcall(capturedSave, resourceName, fileName, data, length)
+
+            if called and nativeSucceeded(result) then
+                return true, result, ('SaveResourceFile(%s)'):format(length == -1 and '-1' or '#data')
+            end
+
+            lastRaw = called and result or nil
+            lastMechanism = ('SaveResourceFile(%s)'):format(length == -1 and '-1' or '#data')
+        end
+    end
+
+    local invoked, raw = pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
+        resourceName, fileName, data, #data, Citizen.ResultAsInteger())
+
+    if invoked and nativeSucceeded(raw) then
+        return true, raw, 'InvokeNative'
+    end
+
+    if lastMechanism then return false, lastRaw, lastMechanism end
+    return false, raw, 'InvokeNative'
+end
+
 ---Write a file inside this resource.
 ---@param fileName string
 ---@param data string
 ---@return boolean ok, any rawResult, string mechanism
 local function writeFile(fileName, data)
-    if type(capturedSave) == 'function' then
-        local ok, result = pcall(capturedSave, RESOURCE, fileName, data, -1)
+    -- The spelling that worked last time first, then the rest.
+    local ok, raw, mechanism = attemptWrite(Meta.resourceName, fileName, data)
 
-        if ok and nativeSucceeded(result) then
-            Meta.mechanism = 'SaveResourceFile'
-            return true, result, 'SaveResourceFile'
-        end
+    if ok then
+        Meta.mechanism = mechanism
+        return true, raw, mechanism
+    end
 
-        -- Fall through to the hash call, but remember what the global said.
-        if ok then
-            local invoked, raw = pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
-                RESOURCE, fileName, data, #data, Citizen.ResultAsInteger())
+    for i = 1, #nameCandidates do
+        local candidate = nameCandidates[i]
 
-            if invoked and nativeSucceeded(raw) then
-                Meta.mechanism = 'InvokeNative'
-                return true, raw, 'InvokeNative'
+        if candidate ~= Meta.resourceName then
+            local retryOk, retryRaw, retryMechanism = attemptWrite(candidate, fileName, data)
+
+            if retryOk then
+                print(('[vehicle-editor] writes work under the resource name "%s", not "%s" — using it from now on.')
+                    :format(candidate, Meta.resourceName))
+                Meta.resourceName = candidate
+                Meta.mechanism = retryMechanism
+                return true, retryRaw, retryMechanism
             end
-
-            Meta.mechanism = 'SaveResourceFile'
-            return false, result, 'SaveResourceFile'
         end
     end
 
-    local invoked, raw = pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
-        RESOURCE, fileName, data, #data, Citizen.ResultAsInteger())
-
-    Meta.mechanism = 'InvokeNative'
-    return invoked and nativeSucceeded(raw), raw, 'InvokeNative'
+    Meta.mechanism = mechanism
+    return false, raw, mechanism
 end
 
 ---Read a file inside this resource.
@@ -103,12 +164,11 @@ end
 ---@return string?
 local function readFile(fileName)
     if type(capturedLoad) == 'function' then
-        local ok, content = pcall(capturedLoad, RESOURCE, fileName)
+        local ok, content = pcall(capturedLoad, Meta.resourceName, fileName)
         if ok and type(content) == 'string' then return content end
-        if ok then return nil end
     end
 
-    local ok, content = pcall(Citizen.InvokeNative, LOAD_RESOURCE_FILE, RESOURCE,
+    local ok, content = pcall(Citizen.InvokeNative, LOAD_RESOURCE_FILE, Meta.resourceName,
         fileName, Citizen.ResultAsString())
 
     return ok and type(content) == 'string' and content or nil
@@ -539,36 +599,33 @@ function Meta.Probe()
 
     local target = 'probe_mechanism.meta'
 
-    local attempts = {
-        {
-            label = 'SaveResourceFile(-1)',
+    -- Vary the mechanism AND the resource-name spelling: SAVE_RESOURCE_FILE
+    -- looks the resource up by name and returns false when it cannot find it.
+    local attempts = {}
+
+    for _, name in ipairs(nameCandidates) do
+        attempts[#attempts + 1] = {
+            label = ('SaveResourceFile(-1) as %s'):format(name),
             run = function(data)
                 if type(capturedSave) ~= 'function' then return nil, 'global missing' end
-                return select(2, pcall(capturedSave, RESOURCE, target, data, -1))
+                return select(2, pcall(capturedSave, name, target, data, -1))
             end,
-        },
-        {
-            label = 'SaveResourceFile(#data)',
+        }
+        attempts[#attempts + 1] = {
+            label = ('SaveResourceFile(#data) as %s'):format(name),
             run = function(data)
                 if type(capturedSave) ~= 'function' then return nil, 'global missing' end
-                return select(2, pcall(capturedSave, RESOURCE, target, data, #data))
+                return select(2, pcall(capturedSave, name, target, data, #data))
             end,
-        },
-        {
-            label = 'InvokeNative + ResultAsInteger',
+        }
+        attempts[#attempts + 1] = {
+            label = ('InvokeNative as %s'):format(name),
             run = function(data)
                 return select(2, pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
-                    RESOURCE, target, data, #data, Citizen.ResultAsInteger()))
+                    name, target, data, #data, Citizen.ResultAsInteger()))
             end,
-        },
-        {
-            label = 'InvokeNative, no hint',
-            run = function(data)
-                return select(2, pcall(Citizen.InvokeNative, SAVE_RESOURCE_FILE,
-                    RESOURCE, target, data, #data))
-            end,
-        },
-    }
+        }
+    end
 
     local results = {}
 
@@ -577,7 +634,16 @@ function Meta.Probe()
 
         local data = payloadFor(i)
         local raw, note = attempt.run(data)
-        local readBack = readFile(target)
+
+        -- Read back under every spelling: a write that landed under one name
+        -- must not be missed because the read used another.
+        local readBack
+        for _, name in ipairs(nameCandidates) do
+            local ok, content = pcall(Citizen.InvokeNative, LOAD_RESOURCE_FILE, name,
+                target, Citizen.ResultAsString())
+            if ok and content == data then readBack = content break end
+            if ok and type(content) == 'string' and not readBack then readBack = content end
+        end
 
         results[#results + 1] = {
             label = attempt.label,

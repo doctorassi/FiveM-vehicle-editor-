@@ -59,6 +59,28 @@ local function installNatives()
         LoadResourceFile = function(_, path) return harness.files[path] end
     end
 
+    ---Expose the globals the way CFX does -- through an __index metamethod on
+    ---the global table rather than as raw entries -- so code using rawget sees
+    ---nothing, exactly as it did on the reported server.
+    function harness.installGlobalsViaMetatable()
+        local backing = {}
+        SaveResourceFile = nil
+        LoadResourceFile = nil
+
+        backing.SaveResourceFile = function(_, path, data)
+            return performWrite(path, data, 'SaveResourceFile')
+        end
+        backing.LoadResourceFile = function(_, path) return harness.files[path] end
+
+        setmetatable(_G, { __index = backing })
+        harness.metatableBacked = true
+    end
+
+    function harness.clearGlobalMetatable()
+        setmetatable(_G, nil)
+        harness.metatableBacked = false
+    end
+
     harness.installGlobals = installGlobals
     installGlobals()
 

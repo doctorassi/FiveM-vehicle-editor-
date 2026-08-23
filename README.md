@@ -267,9 +267,16 @@ server:
 - `Citizen.InvokeNative` with the native hash (`SAVE_RESOURCE_FILE` `0xA09E7E7B`,
   `LOAD_RESOURCE_FILE` `0x76A9EE1F`)
 
-The globals are preferred, and are captured at load so a later reassignment
-cannot swap them out. The hash call is only a fallback for when the globals are
-absent.
+The globals are preferred and are captured at load, which gives the shadowing
+protection while still resolving the real native. They must be captured with a
+**normal read**, never `rawget`: CFX exposes natives through an `__index`
+metamethod on the global table, so `rawget(_G, 'SaveResourceFile')` returns nil
+and the native is never reached. The hash call is only a fallback.
+
+`SAVE_RESOURCE_FILE` also looks the resource up **by name** and returns `false`
+when it cannot resolve it, and FiveM is not consistent about case. The writer
+tries the name `GetCurrentResourceName()` reports, then other spellings of it,
+and remembers whichever works.
 
 Two traps are worth knowing about, because both cost real debugging time here:
 
